@@ -1,58 +1,133 @@
-import winston from 'winston';
+/**
+ * Centralized logging utility
+ */
+import pino from 'pino'
 
-const { combine, timestamp, printf, colorize } = winston.format;
+// Define log levels
+type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
-// Custom format for console output
-const consoleFormat = printf(({ level, message, timestamp, ...meta }) => {
-  const metaStr = Object.keys(meta).length ? JSON.stringify(meta, null, 2) : '';
-  return `${timestamp} [${level}]: ${message} ${metaStr}`;
-});
+// Determine log level from environment or default to 'info'
+const logLevel = (process.env.LOG_LEVEL as LogLevel) || 'info'
 
-// Create logger instance
-export const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'error', // Only show errors in MCP mode
-  format: combine(
-    timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-    winston.format.errors({ stack: true }),
-    winston.format.json()
-  ),
-  defaultMeta: { service: 'github-kg-mcp' },
-  transports: [
-    // File transport only for MCP server - no console output to avoid JSON corruption
-    new winston.transports.File({
-      filename: 'mcp-server.log',
-      level: 'debug',
-      maxsize: 5242880, // 5MB
-      maxFiles: 2,
-    }),
-  ],
-});
+// Create the logger instance
+export const logger = pino({
+  level: logLevel,
+  transport: {
+    target: 'pino-pretty',
+    options: {
+      colorize: true,
+      translateTime: 'SYS:standard',
+      ignore: 'pid,hostname'
+    }
+  }
+})
 
-// Add file transport in production
-if (process.env.NODE_ENV === 'production') {
-  logger.add(
-    new winston.transports.File({
-      filename: 'logs/error.log',
-      level: 'error',
-      maxsize: 5242880, // 5MB
-      maxFiles: 5,
-    })
-  );
-
-  logger.add(
-    new winston.transports.File({
-      filename: 'logs/combined.log',
-      maxsize: 5242880, // 5MB
-      maxFiles: 5,
-    })
-  );
+/**
+ * Set the log level dynamically
+ * @param level The log level to set
+ */
+export function setLogLevel(level: LogLevel): void {
+  (logger as any).level = level
+  logger.info(`Log level set to ${level}`)
 }
 
-// Silence logger in test environment
-if (process.env.NODE_ENV === 'test') {
-  logger.transports.forEach((transport) => {
-    transport.silent = true;
-  });
+/**
+ * Create a child logger with additional context
+ * @param context Context to add to the logger
+ * @returns Child logger instance
+ */
+export function createContextLogger(context: Record<string, any>): typeof logger {
+  return logger.child(context)
 }
 
-export default logger;
+/**
+ * Log performance metrics
+ * @param operation Name of the operation
+ * @param durationMs Duration in milliseconds
+ * @param metadata Additional metadata
+ */
+export function logPerformance(
+  operation: string,
+  durationMs: number,
+  metadata: Record<string, any> = {}
+): void {
+  logger.info({
+    msg: `Performance: ${operation} took ${durationMs}ms`,
+    operation,
+    durationMs,
+    ...metadata,
+    type: 'performance'
+  })
+}
+
+/**
+ * Start timing an operation for performance measurement
+ * @param operation Name of the operation
+ * @returns Function to call when operation is complete
+ */
+export function timeOperation(operation: string): () => void {
+  const startTime = performance.now()
+  return (metadata: Record<string, any> = {}): void => {
+    const endTime = performance.now()
+    const durationMs = Math.round(endTime - startTime)
+    logPerformance(operation, durationMs, metadata)
+  }
+}
+
+/**
+ * Log an error with additional context
+ * @param error The error to log
+ * @param context Additional context
+ */
+export function logError(error: Error | string, context: Record<string, any> = {}): void {
+  if (typeof error === 'string') {
+    logger.error({ ...context, type: 'error' }, error)
+  } else {
+    logger.error(
+      {
+        ...context,
+        error: {
+          message: error.message,
+          stack: error.stack,
+          name: error.name
+        },
+        type: 'error'
+      },
+      error.message
+    )
+  }
+}
+
+/**
+ * Log an API request
+ * @param req Request object
+ * @param res Response object
+ * @param startTime Start time of the request
+ */
+export function logApiRequest(
+  req: {
+    method: string
+    url: string
+    headers: Record<string, any>
+    body?: any
+  },
+  res: {
+    statusCode: number
+  },
+  startTime: number
+): void {
+  const endTime = performance.now()
+  const durationMs = Math.round(endTime - startTime)
+
+  logger.info({
+    msg: `API Request: ${req.method} ${req.url} ${res.statusCode} ${durationMs}ms`,
+    method: req.method,
+    url: req.url,
+    statusCode: res.statusCode,
+    durationMs,
+    userAgent: req.headers['user-agent'],
+    type: 'api'
+  })
+}
+
+export default logger
