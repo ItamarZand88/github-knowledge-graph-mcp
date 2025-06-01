@@ -1,272 +1,703 @@
-import { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+/**
+ * MCP (Model Context Protocol) Server implementation
+ */
+import express from 'express'
+import cors from 'cors'
+import helmet from 'helmet'
+import { createServer } from 'http'
+import { Server as SocketIOServer } from 'socket.io'
+import { logger, logApiRequest } from './utils/logger.js'
+import { nodeLookup } from './core/node-lookup.js'
+import { graphExplorer } from './core/graph-explorer.js'
+import { DependencyAnalyzer } from './core/dependency-analyzer.js'
 import { GraphStorage } from './core/graph-storage.js'
-import { SearchEngine } from './core/search-engine.js'
-import { logger } from './utils/logger.js'
-import type { KnowledgeGraph, GraphNode, CircularDependency } from './types/index.js'
+import { 
+  formatExplorationResult,
+  formatDependencyResult,
+  formatCircularDependencies,
+  formatGraphStatistics,
+  formatNodeDetails,
+  formatPathResult,
+  formatSearchResult
+} from './utils/result-formatters.js'
+import type { 
+  MCPServerConfig,
+  MCPFunction,
+  MCPHandlerContext,
+  MCPHandlerResponse
+} from './types/index.js'
 
-// Description for MCP functions
-export const TOOLS_DESCRIPTIONS = {
-  analyze_repository: `Analyze a GitHub repository and generate a knowledge graph.
-Use this tool to:
-1. Create a complete graph representation of a codebase
-2. Understand the structure and relationships in a repository
-3. Begin an analysis workflow for any code exploration task`,
+// Define MCP Function handlers
+type MCPHandler = (context: MCPHandlerContext) => Promise<MCPHandlerResponse>
 
-  search_nodes: `Search for nodes in the knowledge graph matching specific criteria.
-Use this tool to:
-1. Find specific code elements like functions, components, or files
-2. Discover where particular features are implemented
-3. Locate dependencies between components
-4. Explore the codebase structure`,
+export class MCPServer {
+  private app: express.Express
+  private server: any
+  private io: SocketIOServer
+  private config: MCPServerConfig
+  private graphStorage: GraphStorage
+  private dependencyAnalyzer: DependencyAnalyzer
+  private handlers: Map<string, MCPHandler> = new Map()
+  private functions: MCPFunction[] = []
 
-  get_node_details: `Get detailed information about a specific node.
-This tool provides comprehensive details about any node in the graph, including its properties and relationships.`,
-
-  explore_graph: `Explore the knowledge graph starting from a specific node.
-This tool lets you navigate through the graph structure, discovering relationships between components.`,
-
-  get_graph_statistics: `Get statistics and overview of the knowledge graph.
-This tool provides comprehensive metrics about the graph structure, helping understand the codebase at a high level.`,
-}
-
-export class GitHubKnowledgeGraphMCP {
-  private storage: GraphStorage
-  private searchEngine: SearchEngine
-
-  constructor() {
-    this.storage = new GraphStorage()
-    this.searchEngine = new SearchEngine()
+  constructor(config: MCPServerConfig) {
+    this.config = config
+    this.app = express()
+    this.server = createServer(this.app)
+    this.io = new SocketIOServer(this.server, {
+      cors: {
+        origin: this.config.allowOrigins,
+        methods: ['GET', 'POST']
+      }
+    })
+    
+    this.graphStorage = new GraphStorage(this.config.dataDir)
+    this.dependencyAnalyzer = new DependencyAnalyzer()
+    
+    this.setupMiddleware()
+    this.setupRoutes()
+    this.setupSocketIO()
+    this.registerFunctions()
   }
 
   /**
-   * Analyze a GitHub repository
+   * Set up Express middleware
    */
-  async analyzeRepository(args: any): Promise<CallToolResult> {
-    try {
-      const { repository_url, branch, include_tests, include_private, exclude_patterns } = args
+  private setupMiddleware(): void {
+    // Security middleware
+    this.app.use(helmet())
+    
+    // CORS middleware
+    this.app.use(cors({
+      origin: this.config.allowOrigins,
+      methods: ['GET', 'POST', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key']
+    }))
+    
+    // JSON parsing middleware
+    this.app.use(express.json({ limit: '10mb' }))
+    
+    // Request logging middleware
+    this.app.use((req, res, next) => {
+      const startTime = performance.now()
+      res.on('finish', () => {
+        logApiRequest(req, res, startTime)
+      })
+      next()
+    })
+    
+    // Authentication middleware (if enabled)
+    if (this.config.auth?.enabled) {
+      this.app.use((req, res, next) => {
+        const apiKey = req.headers[this.config.auth!.apiKeyHeader.toLowerCase()]
+        
+        if (!apiKey || !this.config.auth!.apiKeys.includes(apiKey as string)) {
+          return res.status(401).json({ error: 'Unauthorized' })
+        }
+        
+        next()
+      })
+    }
+  }
 
-      // In a full implementation, this would call to the actual analyzer
-      // For now, we'll return a placeholder response
-      logger.info(`Analyzing repository: ${repository_url}`)
+  /**
+   * Set up Express routes
+   */
+  private setupRoutes(): void {
+    // Health check endpoint
+    this.app.get('/health', (req, res) => {
+      res.status(200).json({ status: 'ok' })
+    })
+    
+    // MCP functions endpoint
+    this.app.get('/api/functions', (req, res) => {
+      res.status(200).json({ functions: this.functions })
+    })
+    
+    // MCP function call endpoint
+    this.app.post('/api/call', async (req, res) => {
+      try {
+        const { name, parameters } = req.body
+        
+        if (!name || !parameters) {
+          return res.status(400).json({ error: 'Missing function name or parameters' })
+        }
+        
+        const handler = this.handlers.get(name)
+        
+        if (!handler) {
+          return res.status(404).json({ error: `Function ${name} not found` })
+        }
+        
+        const result = await handler({ params: parameters })
+        
+        res.status(200).json(result)
+      } catch (error: any) {
+        logger.error(`Error calling function: ${error}`)
+        res.status(500).json({ error: error.message || 'Internal server error' })
+      }
+    })
+    
+    // Graph information endpoint
+    this.app.get('/api/graphs', async (req, res) => {
+      try {
+        const graphs = await this.graphStorage.listGraphs()
+        res.status(200).json({ graphs })
+      } catch (error: any) {
+        logger.error(`Error listing graphs: ${error}`)
+        res.status(500).json({ error: error.message || 'Internal server error' })
+      }
+    })
+    
+    // Not found handler
+    this.app.use((req, res) => {
+      res.status(404).json({ error: 'Not found' })
+    })
+    
+    // Error handler
+    this.app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+      logger.error(`Express error: ${err}`)
+      res.status(500).json({ error: err.message || 'Internal server error' })
+    })
+  }
 
-      return {
-        status: 'success',
-        result: {
-          message: 'Repository analysis started',
-          repository: repository_url,
-          job_id: 'placeholder-job-id',
-          status: 'pending',
-          estimatedTime: '2-5 minutes',
-          note: 'This is a placeholder. In a real implementation, this would start the analysis process.'
+  /**
+   * Set up Socket.IO for real-time updates
+   */
+  private setupSocketIO(): void {
+    this.io.on('connection', (socket) => {
+      logger.info(`Socket connected: ${socket.id}`)
+      
+      socket.on('subscribe', (graphId) => {
+        socket.join(`graph:${graphId}`)
+        logger.info(`Socket ${socket.id} subscribed to graph ${graphId}`)
+      })
+      
+      socket.on('unsubscribe', (graphId) => {
+        socket.leave(`graph:${graphId}`)
+        logger.info(`Socket ${socket.id} unsubscribed from graph ${graphId}`)
+      })
+      
+      socket.on('disconnect', () => {
+        logger.info(`Socket disconnected: ${socket.id}`)
+      })
+    })
+  }
+
+  /**
+   * Register all MCP functions and handlers
+   */
+  private registerFunctions(): void {
+    // Define all MCP functions
+    this.functions = [
+      {
+        name: 'analyze_repository',
+        description: 'Analyze a GitHub repository and generate a knowledge graph',
+        parameters: {
+          properties: {
+            repository_url: {
+              type: 'string',
+              description: 'GitHub repository URL to analyze'
+            },
+            branch: {
+              type: 'string',
+              description: 'Git branch to analyze (default: main)',
+              default: 'main'
+            },
+            exclude_patterns: {
+              type: 'array',
+              description: 'Patterns to exclude from analysis',
+              items: {
+                type: 'string'
+              }
+            },
+            include_tests: {
+              type: 'boolean',
+              description: 'Include test files in analysis',
+              default: false
+            },
+            include_private: {
+              type: 'boolean',
+              description: 'Include private members in analysis',
+              default: false
+            }
+          },
+          required: ['repository_url'],
+          type: 'object'
+        }
+      },
+      {
+        name: 'explore_graph',
+        description: 'Explore the knowledge graph and find related nodes',
+        parameters: {
+          properties: {
+            graph_id: {
+              type: 'string',
+              description: 'Knowledge graph ID to explore'
+            },
+            node_id: {
+              type: 'string',
+              description: 'Starting node ID for exploration'
+            },
+            depth: {
+              type: 'number',
+              description: 'Exploration depth (default: 2)',
+              default: 2
+            },
+            relation_types: {
+              type: 'array',
+              description: 'Types of relations to follow (imports, exports, calls, etc.)',
+              items: {
+                type: 'string'
+              }
+            }
+          },
+          required: ['graph_id', 'node_id'],
+          type: 'object'
+        }
+      },
+      {
+        name: 'search_nodes',
+        description: 'Search for nodes in the knowledge graph',
+        parameters: {
+          properties: {
+            graph_id: {
+              type: 'string',
+              description: 'Knowledge graph ID to search in'
+            },
+            query: {
+              type: 'string',
+              description: 'Search query (node name, type, or description)'
+            },
+            node_types: {
+              type: 'array',
+              description: 'Filter by node types (function, class, interface, etc.)',
+              items: {
+                type: 'string'
+              }
+            },
+            limit: {
+              type: 'number',
+              description: 'Maximum number of results (default: 10)',
+              default: 10
+            }
+          },
+          required: ['graph_id', 'query'],
+          type: 'object'
+        }
+      },
+      {
+        name: 'get_node_details',
+        description: 'Get detailed information about a specific node',
+        parameters: {
+          properties: {
+            graph_id: {
+              type: 'string',
+              description: 'Knowledge graph ID'
+            },
+            node_id: {
+              type: 'string',
+              description: 'Node ID to get details for'
+            }
+          },
+          required: ['graph_id', 'node_id'],
+          type: 'object'
+        }
+      },
+      {
+        name: 'find_dependencies',
+        description: 'Find dependencies and dependents of a node',
+        parameters: {
+          properties: {
+            graph_id: {
+              type: 'string',
+              description: 'Knowledge graph ID'
+            },
+            node_id: {
+              type: 'string',
+              description: 'Node ID to analyze dependencies for'
+            },
+            direction: {
+              type: 'string',
+              description: 'Direction of dependencies to analyze',
+              enum: ['incoming', 'outgoing', 'both'],
+              default: 'both'
+            }
+          },
+          required: ['graph_id', 'node_id'],
+          type: 'object'
+        }
+      },
+      {
+        name: 'get_graph_statistics',
+        description: 'Get statistics and overview of the knowledge graph',
+        parameters: {
+          properties: {
+            graph_id: {
+              type: 'string',
+              description: 'Knowledge graph ID'
+            }
+          },
+          required: ['graph_id'],
+          type: 'object'
+        }
+      },
+      {
+        name: 'find_circular_dependencies',
+        description: 'Find circular dependencies in the codebase',
+        parameters: {
+          properties: {
+            graph_id: {
+              type: 'string',
+              description: 'Knowledge graph ID'
+            },
+            max_cycles: {
+              type: 'number',
+              description: 'Maximum number of cycles to find',
+              default: 10
+            }
+          },
+          required: ['graph_id'],
+          type: 'object'
+        }
+      },
+      {
+        name: 'get_analysis_status',
+        description: 'Check the status of a repository analysis job',
+        parameters: {
+          properties: {
+            job_id: {
+              type: 'string',
+              description: 'Job ID returned from analyze_repository'
+            }
+          },
+          required: ['job_id'],
+          type: 'object'
+        }
+      },
+      {
+        name: 'get_analysis_result',
+        description: 'Get the completed analysis result and save it as a knowledge graph',
+        parameters: {
+          properties: {
+            job_id: {
+              type: 'string',
+              description: 'Job ID of completed analysis'
+            }
+          },
+          required: ['job_id'],
+          type: 'object'
         }
       }
-    } catch (error) {
-      logger.error(`Repository analysis error: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    ]
+
+    // Register handlers for each function
+    this.registerHandler('explore_graph', this.handleExploreGraph.bind(this))
+    this.registerHandler('search_nodes', this.handleSearchNodes.bind(this))
+    this.registerHandler('get_node_details', this.handleGetNodeDetails.bind(this))
+    this.registerHandler('find_dependencies', this.handleFindDependencies.bind(this))
+    this.registerHandler('get_graph_statistics', this.handleGetGraphStatistics.bind(this))
+    this.registerHandler('find_circular_dependencies', this.handleFindCircularDependencies.bind(this))
+    
+    // Stub handlers for analysis functions (would be implemented in full version)
+    this.registerHandler('analyze_repository', this.handleAnalyzeRepository.bind(this))
+    this.registerHandler('get_analysis_status', this.handleGetAnalysisStatus.bind(this))
+    this.registerHandler('get_analysis_result', this.handleGetAnalysisResult.bind(this))
+  }
+
+  /**
+   * Register a handler for an MCP function
+   * @param name Function name
+   * @param handler Function handler
+   */
+  private registerHandler(name: string, handler: MCPHandler): void {
+    this.handlers.set(name, handler)
+  }
+
+  /**
+   * Handler for explore_graph function
+   * @param context Handler context
+   * @returns Handler response
+   */
+  private async handleExploreGraph(context: MCPHandlerContext): Promise<MCPHandlerResponse> {
+    try {
+      const { graph_id, node_id, depth, relation_types } = context.params
+      
+      const result = await graphExplorer.exploreGraph(graph_id, node_id, {
+        depth: depth || 2,
+        relationTypes: relation_types
+      })
+      
       return {
-        status: 'error',
-        error: `Failed to analyze repository: ${error instanceof Error ? error.message : 'Unknown error'}`
+        result: formatExplorationResult(result)
+      }
+    } catch (error: any) {
+      logger.error(`Error exploring graph: ${error}`)
+      return {
+        result: null,
+        error: error.message
       }
     }
   }
 
   /**
-   * Explore the knowledge graph
+   * Handler for search_nodes function
+   * @param context Handler context
+   * @returns Handler response
    */
-  async exploreGraph(args: any): Promise<CallToolResult> {
+  private async handleSearchNodes(context: MCPHandlerContext): Promise<MCPHandlerResponse> {
     try {
-      const { graph_id, node_id, depth = 2, relation_types } = args
-
-      // Retrieve the graph
-      const graph = await this.storage.getGraph(graph_id)
-      if (!graph) {
-        return {
-          status: 'error',
-          error: `Graph not found: ${graph_id}`
-        }
-      }
-
-      // Find the starting node
-      const startNode = graph.nodes.find(node => node.id === node_id)
-      if (!startNode) {
-        return {
-          status: 'error',
-          error: `Node not found: ${node_id}`
-        }
-      }
-
-      // In a full implementation, this would perform graph traversal
-      // For now, return a placeholder
+      const { graph_id, query, node_types, limit } = context.params
+      
+      const result = await graphExplorer.searchNodes(graph_id, query, {
+        limit: limit || 10,
+        nodeTypes: node_types
+      })
+      
       return {
-        status: 'success',
-        result: {
-          startNode,
-          relatedNodes: [],
-          message: 'Graph exploration is a placeholder in this simplified version',
-        }
+        result: formatSearchResult(result)
       }
-    } catch (error) {
-      logger.error(`Graph exploration error: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    } catch (error: any) {
+      logger.error(`Error searching nodes: ${error}`)
       return {
-        status: 'error',
-        error: `Failed to explore graph: ${error instanceof Error ? error.message : 'Unknown error'}`
+        result: null,
+        error: error.message
       }
     }
   }
 
   /**
-   * Search for nodes in the knowledge graph
+   * Handler for get_node_details function
+   * @param context Handler context
+   * @returns Handler response
    */
-  async searchNodes(args: any): Promise<CallToolResult> {
+  private async handleGetNodeDetails(context: MCPHandlerContext): Promise<MCPHandlerResponse> {
     try {
-      const {
-        graph_id,
-        query,
-        node_types,
-        search_mode = 'fuzzy',
-        limit = 10
-      } = args
-
-      // Retrieve the graph
-      const graph = await this.storage.getGraph(graph_id)
-      if (!graph) {
-        return {
-          status: 'error',
-          error: `Graph not found: ${graph_id}`
-        }
+      const { graph_id, node_id } = context.params
+      
+      const result = await graphExplorer.getNodeDetails(graph_id, node_id)
+      
+      return {
+        result: formatNodeDetails(result)
       }
+    } catch (error: any) {
+      logger.error(`Error getting node details: ${error}`)
+      return {
+        result: null,
+        error: error.message
+      }
+    }
+  }
 
-      // Perform the search
-      const results = this.searchEngine.searchNodes(
-        graph,
-        query,
-        { nodeTypes: node_types },
-        search_mode as 'exact' | 'fuzzy' | 'semantic',
-        limit
+  /**
+   * Handler for find_dependencies function
+   * @param context Handler context
+   * @returns Handler response
+   */
+  private async handleFindDependencies(context: MCPHandlerContext): Promise<MCPHandlerResponse> {
+    try {
+      const { graph_id, node_id, direction } = context.params
+      
+      const result = await this.dependencyAnalyzer.findDependencies(
+        graph_id, 
+        node_id,
+        direction || 'both'
       )
-
-      return {
-        status: 'success',
-        result: {
-          query,
-          count: results.length,
-          results
-        }
+      
+      // Convert to standardized format
+      const dependencyResult = {
+        nodeName: result.nodeInfo?.name || 'Unknown',
+        nodeType: result.nodeInfo?.type || 'Unknown',
+        incoming: result.incoming,
+        outgoing: result.outgoing,
+        directDependencies: result.directDependencies,
+        transitiveDependencies: result.transitiveDependencies,
+        maxDepth: 0 // Would be calculated in full implementation
       }
-    } catch (error) {
-      logger.error(`Node search error: ${error instanceof Error ? error.message : 'Unknown error'}`)
+      
       return {
-        status: 'error',
-        error: `Failed to search nodes: ${error instanceof Error ? error.message : 'Unknown error'}`
+        result: formatDependencyResult(dependencyResult)
+      }
+    } catch (error: any) {
+      logger.error(`Error finding dependencies: ${error}`)
+      return {
+        result: null,
+        error: error.message
       }
     }
   }
 
   /**
-   * Get detailed information about a node
+   * Handler for get_graph_statistics function
+   * @param context Handler context
+   * @returns Handler response
    */
-  async getNodeDetails(args: any): Promise<CallToolResult> {
+  private async handleGetGraphStatistics(context: MCPHandlerContext): Promise<MCPHandlerResponse> {
     try {
-      const { graph_id, node_id } = args
-
-      // Retrieve the graph
-      const graph = await this.storage.getGraph(graph_id)
-      if (!graph) {
-        return {
-          status: 'error',
-          error: `Graph not found: ${graph_id}`
-        }
-      }
-
-      // Find the node
-      const node = graph.nodes.find(n => n.id === node_id)
-      if (!node) {
-        return {
-          status: 'error',
-          error: `Node not found: ${node_id}`
-        }
-      }
-
-      // Find related edges
-      const incomingEdges = graph.edges.filter(edge => edge.to === node_id)
-      const outgoingEdges = graph.edges.filter(edge => edge.from === node_id)
-
+      const { graph_id } = context.params
+      
+      const result = await graphExplorer.getGraphStatistics(graph_id)
+      
       return {
-        status: 'success',
-        result: {
-          node,
-          incomingEdges,
-          outgoingEdges
-        }
+        result: formatGraphStatistics(result)
       }
-    } catch (error) {
-      logger.error(`Get node details error: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    } catch (error: any) {
+      logger.error(`Error getting graph statistics: ${error}`)
       return {
-        status: 'error',
-        error: `Failed to get node details: ${error instanceof Error ? error.message : 'Unknown error'}`
+        result: null,
+        error: error.message
       }
     }
   }
 
   /**
-   * Get statistics about the knowledge graph
+   * Handler for find_circular_dependencies function
+   * @param context Handler context
+   * @returns Handler response
    */
-  async getGraphStatistics(args: any): Promise<CallToolResult> {
+  private async handleFindCircularDependencies(context: MCPHandlerContext): Promise<MCPHandlerResponse> {
     try {
-      const { graph_id } = args
-
-      // Retrieve the graph
-      const graph = await this.storage.getGraph(graph_id)
-      if (!graph) {
-        return {
-          status: 'error',
-          error: `Graph not found: ${graph_id}`
-        }
-      }
-
-      // Calculate basic statistics
-      const nodeCount = graph.nodes.length
-      const edgeCount = graph.edges.length
-      const fileCount = graph.nodes.filter(node => node.type === 'File').length
-
-      // Node types distribution
-      const nodeTypes: Record<string, number> = {}
-      graph.nodes.forEach(node => {
-        nodeTypes[node.type] = (nodeTypes[node.type] || 0) + 1
-      })
-
-      // Edge types distribution
-      const edgeTypes: Record<string, number> = {}
-      graph.edges.forEach(edge => {
-        edgeTypes[edge.type] = (edgeTypes[edge.type] || 0) + 1
-      })
-
+      const { graph_id, max_cycles } = context.params
+      
+      const result = await this.dependencyAnalyzer.findCircularDependencies(
+        graph_id,
+        max_cycles || 10
+      )
+      
       return {
-        status: 'success',
-        result: {
-          graphId: graph_id,
-          metadata: graph.metadata,
-          statistics: {
-            nodeCount,
-            edgeCount,
-            fileCount,
-            nodeTypes,
-            edgeTypes
-          }
-        }
+        result: formatCircularDependencies(result)
       }
-    } catch (error) {
-      logger.error(`Get graph statistics error: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    } catch (error: any) {
+      logger.error(`Error finding circular dependencies: ${error}`)
       return {
-        status: 'error',
-        error: `Failed to get graph statistics: ${error instanceof Error ? error.message : 'Unknown error'}`
+        result: null,
+        error: error.message
       }
     }
   }
 
   /**
-   * List all available graphs
+   * Handler for analyze_repository function
+   * Note: This would be fully implemented in production with a GitHub API client
+   * @param context Handler context
+   * @returns Handler response
    */
-  async listAvailableGraphs(): Promise<any[]> {
-    return this.storage.listGraphs()
+  private async handleAnalyzeRepository(context: MCPHandlerContext): Promise<MCPHandlerResponse> {
+    try {
+      const { repository_url } = context.params
+      
+      // Generate a job ID
+      const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
+      
+      // In a real implementation, this would start a background job
+      // For now, we'll just return a job ID
+      
+      logger.info(`Repository analysis requested for ${repository_url}, job ID: ${jobId}`)
+      
+      return {
+        result: {
+          job_id: jobId,
+          status: 'pending',
+          message: `Analysis job created for ${repository_url}`
+        }
+      }
+    } catch (error: any) {
+      logger.error(`Error starting repository analysis: ${error}`)
+      return {
+        result: null,
+        error: error.message
+      }
+    }
+  }
+
+  /**
+   * Handler for get_analysis_status function
+   * Note: This would be fully implemented in production
+   * @param context Handler context
+   * @returns Handler response
+   */
+  private async handleGetAnalysisStatus(context: MCPHandlerContext): Promise<MCPHandlerResponse> {
+    try {
+      const { job_id } = context.params
+      
+      // In a real implementation, this would check the status of a background job
+      // For now, we'll just return a mock status
+      
+      logger.info(`Analysis status requested for job ${job_id}`)
+      
+      return {
+        result: {
+          job_id,
+          status: 'pending',
+          progress: 0,
+          message: 'Job is queued'
+        }
+      }
+    } catch (error: any) {
+      logger.error(`Error getting analysis status: ${error}`)
+      return {
+        result: null,
+        error: error.message
+      }
+    }
+  }
+
+  /**
+   * Handler for get_analysis_result function
+   * Note: This would be fully implemented in production
+   * @param context Handler context
+   * @returns Handler response
+   */
+  private async handleGetAnalysisResult(context: MCPHandlerContext): Promise<MCPHandlerResponse> {
+    try {
+      const { job_id } = context.params
+      
+      // In a real implementation, this would get the result of a completed job
+      // For now, we'll just return an error
+      
+      logger.info(`Analysis result requested for job ${job_id}`)
+      
+      return {
+        result: null,
+        error: 'Analysis not implemented in this version'
+      }
+    } catch (error: any) {
+      logger.error(`Error getting analysis result: ${error}`)
+      return {
+        result: null,
+        error: error.message
+      }
+    }
+  }
+
+  /**
+   * Start the MCP server
+   * @returns Promise that resolves when the server is started
+   */
+  public async start(): Promise<void> {
+    return new Promise((resolve) => {
+      this.server.listen(this.config.port, this.config.host, () => {
+        logger.info(`MCP server listening on ${this.config.host}:${this.config.port}`)
+        resolve()
+      })
+    })
+  }
+
+  /**
+   * Stop the MCP server
+   * @returns Promise that resolves when the server is stopped
+   */
+  public async stop(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.server.close((err: any) => {
+        if (err) {
+          logger.error(`Error stopping server: ${err}`)
+          reject(err)
+        } else {
+          logger.info('MCP server stopped')
+          resolve()
+        }
+      })
+    })
   }
 }
