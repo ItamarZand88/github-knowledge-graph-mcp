@@ -1,13 +1,12 @@
-# Logs
-logs
-*.log
-npm-debug.log*
-
 # Dependency directories
 node_modules/
+jspm_packages/
 
-# Build output
+# TypeScript compiled output
 dist/
+build/
+out/
+*.tsbuildinfo
 
 # Environment variables
 .env
@@ -16,19 +15,40 @@ dist/
 .env.test.local
 .env.production.local
 
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Cache directories
+.npm
+.eslintcache
+.cache
+.parcel-cache
+
 # Editor directories and files
 .idea/
 .vscode/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-# OS specific
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
 .DS_Store
-Thumbs.db
 
-# Data directory (except keep the structure)
+# Debug files
+.nyc_output/
+coverage/
+
+# Data files
+data/*
+!data/graphs/
 data/graphs/*
 !data/graphs/.gitkeep
+
+# Temporary files
+tmp/
+temp/
+*.tmp
