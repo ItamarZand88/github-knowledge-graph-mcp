@@ -1,265 +1,120 @@
-#!/usr/bin/env node
+/**
+ * GitHub Knowledge Graph MCP Server
+ * Entry point for the MCP server
+ */
+import { config } from 'dotenv'
+import path from 'path'
+import fs from 'fs'
+import { logger, setLogLevel } from './utils/logger.js'
+import { MCPServer } from './mcp-server.js'
+import type { MCPServerConfig } from './types/index.js'
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  Tool,
-  CallToolRequest,
-  CallToolResult,
-  ListResourcesRequestSchema,
-  ReadResourceRequestSchema,
-  Resource,
-  ReadResourceRequest,
-  ReadResourceResult,
-} from '@modelcontextprotocol/sdk/types.js'
-import { GitHubKnowledgeGraphMCP } from './mcp-server.js'
-import { logger } from './utils/logger.js'
+// Load environment variables
+config()
 
-const SERVER_NAME = 'github-knowledge-graph-mcp'
-const SERVER_VERSION = '1.0.0'
+// Default configuration
+const defaultConfig: MCPServerConfig = {
+  port: 3010,
+  host: '127.0.0.1',
+  dataDir: path.join(process.cwd(), 'data'),
+  maxConcurrentJobs: 2,
+  jobTimeout: 1800000, // 30 minutes
+  allowOrigins: ['http://localhost:3000'],
+  logLevel: 'info'
+}
 
-class GitHubKGMCPServer {
-  private server: Server
-  private kgMCP: GitHubKnowledgeGraphMCP
-
-  constructor() {
-    this.server = new Server(
-      {
-        name: SERVER_NAME,
-        version: SERVER_VERSION,
-      },
-      {
-        capabilities: {
-          tools: {},
-          resources: {},
-        },
-      }
-    )
-
-    this.kgMCP = new GitHubKnowledgeGraphMCP()
-    this.setupHandlers()
+/**
+ * Load server configuration from file or environment variables
+ * @returns Server configuration
+ */
+function loadConfig(): MCPServerConfig {
+  // Try to load configuration file
+  let fileConfig: Partial<MCPServerConfig> = {}
+  const configPath = path.join(process.cwd(), 'mcp-config.json')
+  
+  if (fs.existsSync(configPath)) {
+    try {
+      const configContent = fs.readFileSync(configPath, 'utf-8')
+      fileConfig = JSON.parse(configContent)
+      logger.info(`Configuration loaded from ${configPath}`)
+    } catch (error) {
+      logger.warn(`Error loading configuration file: ${error}`)
+    }
   }
+  
+  // Load configuration from environment variables with fallback to file config and defaults
+  const config: MCPServerConfig = {
+    port: parseInt(process.env.MCP_PORT || '') || fileConfig.port || defaultConfig.port,
+    host: process.env.MCP_HOST || fileConfig.host || defaultConfig.host,
+    dataDir: process.env.MCP_DATA_DIR || fileConfig.dataDir || defaultConfig.dataDir,
+    maxConcurrentJobs: parseInt(process.env.MCP_MAX_CONCURRENT_JOBS || '') || 
+      fileConfig.maxConcurrentJobs || defaultConfig.maxConcurrentJobs,
+    jobTimeout: parseInt(process.env.MCP_JOB_TIMEOUT || '') || 
+      fileConfig.jobTimeout || defaultConfig.jobTimeout,
+    allowOrigins: process.env.MCP_ALLOW_ORIGINS ? 
+      process.env.MCP_ALLOW_ORIGINS.split(',') : 
+      fileConfig.allowOrigins || defaultConfig.allowOrigins,
+    logLevel: (process.env.MCP_LOG_LEVEL || 
+      fileConfig.logLevel || 
+      defaultConfig.logLevel) as 'debug' | 'info' | 'warn' | 'error'
+  }
+  
+  // Load authentication configuration if enabled
+  const authEnabled = process.env.MCP_AUTH_ENABLED === 'true' || fileConfig.auth?.enabled
+  
+  if (authEnabled) {
+    config.auth = {
+      enabled: true,
+      apiKeyHeader: process.env.MCP_AUTH_HEADER || 
+        fileConfig.auth?.apiKeyHeader || 
+        'x-api-key',
+      apiKeys: process.env.MCP_AUTH_API_KEYS ? 
+        process.env.MCP_AUTH_API_KEYS.split(',') : 
+        fileConfig.auth?.apiKeys || []
+    }
+  }
+  
+  return config
+}
 
-  private setupHandlers(): void {
-    // List available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const tools: Tool[] = [
-        {
-          name: 'analyze_repository',
-          description:
-            'Analyze a GitHub repository and generate a knowledge graph',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              repository_url: {
-                type: 'string',
-                description: 'GitHub repository URL to analyze',
-              },
-              branch: {
-                type: 'string',
-                description: 'Git branch to analyze (default: main)',
-                default: 'main',
-              },
-              include_tests: {
-                type: 'boolean',
-                description: 'Include test files in analysis',
-                default: false,
-              },
-              include_private: {
-                type: 'boolean',
-                description: 'Include private members in analysis',
-                default: false,
-              },
-              exclude_patterns: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Patterns to exclude from analysis',
-              },
-            },
-            required: ['repository_url'],
-          },
-        },
-        {
-          name: 'explore_graph',
-          description: 'Explore the knowledge graph and find related nodes',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              graph_id: {
-                type: 'string',
-                description: 'Knowledge graph ID to explore',
-              },
-              node_id: {
-                type: 'string',
-                description: 'Starting node ID for exploration',
-              },
-              depth: {
-                type: 'number',
-                description: 'Exploration depth (default: 2)',
-                default: 2,
-              },
-              relation_types: {
-                type: 'array',
-                items: { type: 'string' },
-                description:
-                  'Types of relations to follow (imports, exports, calls, etc.)',
-              },
-            },
-            required: ['graph_id', 'node_id'],
-          },
-        },
-        {
-          name: 'search_nodes',
-          description:
-            'Search for nodes in the knowledge graph',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              graph_id: {
-                type: 'string',
-                description: 'Knowledge graph ID to search in',
-              },
-              query: {
-                type: 'string',
-                description: 'Search query (node name, type, or description)',
-              },
-              node_types: {
-                type: 'array',
-                items: { type: 'string' },
-                description:
-                  'Filter by node types (function, class, interface, etc.)',
-              },
-              search_mode: {
-                type: 'string',
-                enum: ['exact', 'fuzzy', 'semantic'],
-                description:
-                  'Search mode: exact (strict matching), fuzzy (partial matching), semantic (meaning-based)',
-                default: 'fuzzy',
-              },
-              limit: {
-                type: 'number',
-                description: 'Maximum number of results (default: 10)',
-                default: 10,
-              },
-            },
-            required: ['graph_id', 'query'],
-          },
-        },
-        {
-          name: 'get_node_details',
-          description: 'Get detailed information about a specific node',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              graph_id: {
-                type: 'string',
-                description: 'Knowledge graph ID',
-              },
-              node_id: {
-                type: 'string',
-                description: 'Node ID to get details for',
-              },
-            },
-            required: ['graph_id', 'node_id'],
-          },
-        },
-        {
-          name: 'get_graph_statistics',
-          description: 'Get statistics and overview of the knowledge graph',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              graph_id: {
-                type: 'string',
-                description: 'Knowledge graph ID',
-              },
-            },
-            required: ['graph_id'],
-          },
-        },
-      ]
-
-      return { tools }
+/**
+ * Start the MCP server
+ */
+async function startServer() {
+  try {
+    // Load configuration
+    const config = loadConfig()
+    
+    // Set log level
+    setLogLevel(config.logLevel)
+    
+    // Create and start server
+    const server = new MCPServer(config)
+    await server.start()
+    
+    // Handle shutdown signals
+    process.on('SIGINT', async () => {
+      logger.info('Received SIGINT signal. Shutting down...')
+      await server.stop()
+      process.exit(0)
     })
-
-    // Handle tool calls
-    this.server.setRequestHandler(
-      CallToolRequestSchema,
-      async (request: CallToolRequest) => {
-        const { name, parameters } = request.tool
-        
-        let result: CallToolResult
-        
-        try {
-          switch (name) {
-            case 'analyze_repository':
-              result = await this.kgMCP.analyzeRepository(parameters)
-              break
-              
-            case 'explore_graph':
-              result = await this.kgMCP.exploreGraph(parameters)
-              break
-              
-            case 'search_nodes':
-              result = await this.kgMCP.searchNodes(parameters)
-              break
-              
-            case 'get_node_details':
-              result = await this.kgMCP.getNodeDetails(parameters)
-              break
-              
-            case 'get_graph_statistics':
-              result = await this.kgMCP.getGraphStatistics(parameters)
-              break
-              
-            default:
-              result = {
-                status: 'error',
-                error: `Unknown tool: ${name}`,
-              }
-          }
-        } catch (error) {
-          logger.error(
-            `Error executing tool ${name}: ${
-              error instanceof Error ? error.message : 'Unknown error'
-            }`
-          )
-          
-          result = {
-            status: 'error',
-            error: `Error executing ${name}: ${
-              error instanceof Error ? error.message : 'Unknown error'
-            }`,
-          }
-        }
-        
-        return result
-      }
-    )
-  }
-
-  async start(): Promise<void> {
-    const transport = new StdioServerTransport()
-    await this.server.start(transport)
-    logger.info('GitHub Knowledge Graph MCP Server started')
+    
+    process.on('SIGTERM', async () => {
+      logger.info('Received SIGTERM signal. Shutting down...')
+      await server.stop()
+      process.exit(0)
+    })
+    
+    logger.info(`MCP server started on ${config.host}:${config.port}`)
+  } catch (error) {
+    logger.error('Failed to start MCP server:', error)
+    process.exit(1)
   }
 }
 
-// Start the server when this script is run directly
-if (process.argv[1] === import.meta.url.substring(7)) {
-  const server = new GitHubKGMCPServer()
-  server
-    .start()
-    .catch((error) => {
-      logger.error(
-        `Failed to start MCP server: ${
-          error instanceof Error ? error.message : 'Unknown error'
-        }`
-      )
-      process.exit(1)
-    })
+// Start the server when this file is run directly
+if (require.main === module) {
+  startServer()
 }
 
-export { GitHubKGMCPServer }
+export { startServer, loadConfig }
