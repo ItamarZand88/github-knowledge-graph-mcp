@@ -45,6 +45,22 @@ export MCP_DATA_DIR=$HOME/github-kg-data
 github-kg-mcp
 ```
 
+## Claude Desktop Integration
+
+You can automatically configure Claude Desktop to use this MCP server:
+
+```bash
+# If installed globally
+npx github-knowledge-graph-mcp install-claude
+
+# Or if installed locally
+npm run install-claude
+```
+
+This will add the MCP server configuration to your Claude Desktop config file located at:
+`%APPDATA%\Claude\claude_desktop_config.json` (Windows) or
+`$HOME/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
+
 ## API Usage
 
 The server implements the Model Context Protocol (MCP), enabling AI models to analyze and explore code repositories.
