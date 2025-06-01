@@ -29,9 +29,11 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@types/fs-extra": "11.0.4",
     "cors": "^2.8.5",
     "dotenv": "^16.0.3",
     "express": "^4.18.2",
+    "fs-extra": "11.3.0",
     "helmet": "^6.0.1",
     "pino": "^8.11.0",
     "pino-pretty": "^9.4.0",
