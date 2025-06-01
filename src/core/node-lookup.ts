@@ -1,320 +1,378 @@
 /**
- * Unified node lookup system with multiple search strategies
- * Provides backward compatibility with legacy node ID formats
+ * Fast node lookup service with caching and efficient indexing
  */
-
-import { GraphNode, KnowledgeGraph } from '../types/index.js'
-import { GraphStorage } from './graph-storage.js'
 import { logger } from '../utils/logger.js'
+import { GraphStorage } from './graph-storage.js'
+import type { KnowledgeGraph, GraphNode } from '../types/index.js'
+import { normalizeNodeId, parseNodeId, findNodeByQuery } from '../utils/node-id.js'
 
-export interface NodeLookupOptions {
-  nodeType?: string
-  maxResults?: number
-  includeFuzzy?: boolean
-  exactMatchOnly?: boolean
-  searchInFiles?: string[]
+// Cache structures for fast node lookups
+interface NodeCache {
+  byId: Map<string, GraphNode>
+  byName: Map<string, GraphNode[]>
+  byType: Map<string, GraphNode[]>
+  byFile: Map<string, GraphNode[]>
+  lastUpdated: number
 }
 
-export interface NodeDetails {
-  node: GraphNode
-  relatedNodes: GraphNode[]
-  incomingRelations: any[]
-  outgoingRelations: any[]
-  relationshipCount: number
-}
-
-export interface SearchResult {
-  node: GraphNode
-  score: number
-  reason: string
-}
-
-class NodeLookup {
-  private static instance: NodeLookup
+class NodeLookupService {
   private storage: GraphStorage
-  private graphIndexCache = new Map<string, Map<string, GraphNode>>()
+  private caches: Map<string, NodeCache> = new Map()
+  private cacheExpiryMs: number = 5 * 60 * 1000 // 5 minutes
+  private initializing: Map<string, Promise<void>> = new Map()
 
-  private constructor() {
+  constructor() {
     this.storage = new GraphStorage()
   }
 
-  public static getInstance(): NodeLookup {
-    if (!NodeLookup.instance) {
-      NodeLookup.instance = new NodeLookup()
+  /**
+   * Initialize the cache for a specific graph
+   * @param graphId The ID of the graph to initialize cache for
+   */
+  private async initializeCache(graphId: string): Promise<void> {
+    // Return existing initialization promise if already in progress
+    if (this.initializing.has(graphId)) {
+      return this.initializing.get(graphId)!
     }
-    return NodeLookup.instance
+
+    // Create a new initialization promise
+    const initPromise = (async () => {
+      try {
+        logger.info(`Initializing node lookup cache for graph ${graphId}`)
+        const graph = await this.storage.getGraph(graphId)
+        
+        if (!graph) {
+          throw new Error(`Graph not found: ${graphId}`)
+        }
+        
+        const byId = new Map<string, GraphNode>()
+        const byName = new Map<string, GraphNode[]>()
+        const byType = new Map<string, GraphNode[]>()
+        const byFile = new Map<string, GraphNode[]>()
+        
+        // Index all nodes
+        for (const node of graph.nodes) {
+          // Index by ID (unique)
+          byId.set(node.id, node)
+          
+          // Index by name (can have multiple nodes with same name)
+          if (!byName.has(node.name)) {
+            byName.set(node.name, [])
+          }
+          byName.get(node.name)!.push(node)
+          
+          // Index by type
+          if (!byType.has(node.type)) {
+            byType.set(node.type, [])
+          }
+          byType.get(node.type)!.push(node)
+          
+          // Index by file (if applicable)
+          if (node.file) {
+            if (!byFile.has(node.file)) {
+              byFile.set(node.file, [])
+            }
+            byFile.get(node.file)!.push(node)
+          }
+        }
+        
+        // Store the cache
+        this.caches.set(graphId, {
+          byId,
+          byName,
+          byType,
+          byFile,
+          lastUpdated: Date.now()
+        })
+        
+        logger.info(`Cache initialized for graph ${graphId} with ${graph.nodes.length} nodes`)
+      } catch (error) {
+        logger.error(`Failed to initialize cache for graph ${graphId}:`, error)
+        throw error
+      } finally {
+        // Remove from initializing map
+        this.initializing.delete(graphId)
+      }
+    })()
+
+    // Store the promise
+    this.initializing.set(graphId, initPromise)
+    return initPromise
   }
 
   /**
-   * Normalized node ID lookup with flexible formats
-   * Supports both normalized IDs and legacy formats
+   * Get the cache for a graph, initializing if needed
+   * @param graphId The ID of the graph to get cache for
+   * @returns The node cache
+   */
+  private async getCache(graphId: string): Promise<NodeCache> {
+    // Check if cache exists and is not expired
+    const existing = this.caches.get(graphId)
+    const now = Date.now()
+    
+    if (existing && (now - existing.lastUpdated < this.cacheExpiryMs)) {
+      return existing
+    }
+    
+    // Initialize or refresh cache
+    await this.initializeCache(graphId)
+    return this.caches.get(graphId)!
+  }
+
+  /**
+   * Get a node by ID with fast lookup
+   * @param graphId The ID of the graph to search in
+   * @param nodeId The ID of the node to get
+   * @returns The node or undefined if not found
+   */
+  public async getNode(graphId: string, nodeId: string): Promise<GraphNode | undefined> {
+    try {
+      const cache = await this.getCache(graphId)
+      return cache.byId.get(nodeId)
+    } catch (error) {
+      logger.error(`Error getting node ${nodeId} in graph ${graphId}:`, error)
+      throw error
+    }
+  }
+
+  /**
+   * Find a node by name, type or path
+   * @param graphId The ID of the graph to search in
+   * @param query The query to search for (name, ID, etc.)
+   * @param type Optional node type to filter by
+   * @returns The matching node or null if not found
    */
   public async findNode(
-    graphId: string,
-    nodeQuery: string,
-    options: NodeLookupOptions = {}
+    graphId: string, 
+    query: string,
+    type?: string
   ): Promise<GraphNode | null> {
-    const results = await this.findNodes(graphId, nodeQuery, {
-      ...options,
-      maxResults: 1,
-    })
-    return results.length > 0 ? results[0].node : null
-  }
-
-  /**
-   * Find multiple nodes matching the query
-   */
-  public async findNodes(
-    graphId: string,
-    nodeQuery: string,
-    options: NodeLookupOptions = {}
-  ): Promise<SearchResult[]> {
-    const nodeIndex = await this.getIndexForGraph(graphId)
-    if (!nodeIndex || nodeIndex.size === 0) {
-      logger.error(`No index found for graph ${graphId}`)
-      return []
-    }
-
-    // Handle file filtering - convert to more specific queries if needed
-    if (options.searchInFiles && options.searchInFiles.length > 0) {
-      const fileResults: SearchResult[] = []
-
-      // Search in each specified file
-      for (const filePath of options.searchInFiles) {
-        // Get all nodes in this file from the index
-        const nodesInFile = Array.from(nodeIndex.values()).filter(node => 
-          node.file && node.file.includes(filePath)
-        )
-
-        // Filter nodes that match the query
-        for (const node of nodesInFile) {
-          if (this.nodeMatchesQuery(node, nodeQuery)) {
-            fileResults.push({
-              node,
-              score: this.calculateScore(node, nodeQuery),
-              reason: 'file_filtered',
-            })
+    try {
+      const cache = await this.getCache(graphId)
+      
+      // Step 1: Try direct ID lookup (fastest)
+      if (cache.byId.has(query)) {
+        return cache.byId.get(query)!
+      }
+      
+      // Step 2: Try exact name match with optional type filter
+      if (cache.byName.has(query)) {
+        const nameMatches = cache.byName.get(query)!
+        
+        // If type filter is provided, filter by type
+        if (type) {
+          const typeMatches = nameMatches.filter(node => node.type === type)
+          if (typeMatches.length === 1) {
+            return typeMatches[0]
+          } else if (typeMatches.length > 0) {
+            // Return exported/public node if available
+            const exportedMatch = typeMatches.find(node => node.metadata?.isExported)
+            return exportedMatch || typeMatches[0]
+          }
+        } else if (nameMatches.length === 1) {
+          return nameMatches[0]
+        } else if (nameMatches.length > 0) {
+          // Return exported/public node if available
+          const exportedMatch = nameMatches.find(node => node.metadata?.isExported)
+          return exportedMatch || nameMatches[0]
+        }
+      }
+      
+      // Step 3: Try to match by normalized ID
+      // For this we need the raw graph (expensive but needed for complex cases)
+      const graph = await this.storage.getGraph(graphId)
+      if (!graph) {
+        throw new Error(`Graph not found: ${graphId}`)
+      }
+      
+      // Try to normalize the ID
+      const normalizedId = normalizeNodeId(query, graph)
+      if (normalizedId !== query && cache.byId.has(normalizedId)) {
+        return cache.byId.get(normalizedId)!
+      }
+      
+      // Step 4: Try to parse the ID and match components
+      const idParts = parseNodeId(query)
+      if (idParts) {
+        // If we have a type, filter nodes by that type
+        if (idParts.type && cache.byType.has(idParts.type)) {
+          const typeMatches = cache.byType.get(idParts.type)!
+          
+          // Find nodes matching name and path parts
+          const matches = typeMatches.filter(node => {
+            // Extract parts from the actual node ID for comparison
+            const nodeParts = parseNodeId(node.id)
+            if (!nodeParts) return false
+            
+            return (
+              (!idParts.name || nodeParts.name === idParts.name) &&
+              (!idParts.path || nodeParts.path.includes(idParts.path))
+            )
+          })
+          
+          if (matches.length === 1) {
+            return matches[0]
+          } else if (matches.length > 0) {
+            // Return exported/public node if available
+            const exportedMatch = matches.find(node => node.metadata?.isExported)
+            return exportedMatch || matches[0]
           }
         }
       }
-
-      return fileResults
-        .sort((a, b) => b.score - a.score)
-        .slice(0, options.maxResults || 10)
-    }
-
-    // Regular search
-    const results: SearchResult[] = []
-    
-    // Exact match by ID
-    const exactNode = nodeIndex.get(nodeQuery);
-    if (exactNode) {
-      results.push({
-        node: exactNode,
-        score: 1.0,
-        reason: 'exact_id'
-      });
       
-      if (options.exactMatchOnly) {
-        return results;
-      }
-    }
-    
-    // Name match
-    for (const node of nodeIndex.values()) {
-      if (node.name.toLowerCase() === nodeQuery.toLowerCase()) {
-        if (!results.some(r => r.node.id === node.id)) {
-          results.push({
-            node,
-            score: 0.9,
-            reason: 'exact_name'
-          });
-        }
-      }
-    }
-    
-    // Fuzzy matching if requested
-    if (options.includeFuzzy !== false) {
-      for (const node of nodeIndex.values()) {
-        // Skip nodes already added via exact matches
-        if (results.some(r => r.node.id === node.id)) {
-          continue;
+      // Step 5: Check if query looks like a file path
+      if (query.includes('.') || query.includes('/') || query.includes('\\')) {
+        // Try to find exact file path match
+        if (cache.byFile.has(query)) {
+          const fileMatches = cache.byFile.get(query)!
+          // Prefer the node representing the file itself
+          const fileNode = fileMatches.find(node => node.type === 'File')
+          return fileNode || fileMatches[0]
         }
         
-        // Filter by node type if specified
-        if (options.nodeType && node.type !== options.nodeType) {
-          continue;
-        }
-        
-        // Fuzzy name match
-        if (node.name.toLowerCase().includes(nodeQuery.toLowerCase()) ||
-            node.id.toLowerCase().includes(nodeQuery.toLowerCase())) {
-          results.push({
-            node,
-            score: 0.7,
-            reason: 'fuzzy'
-          });
+        // Try to find partial file path match
+        for (const [filePath, nodes] of cache.byFile.entries()) {
+          if (filePath.includes(query)) {
+            // Prefer the node representing the file itself
+            const fileNode = nodes.find(node => node.type === 'File')
+            return fileNode || nodes[0]
+          }
         }
       }
+      
+      // Step 6: Fall back to more expensive comprehensive search
+      return findNodeByQuery(graph, query, type) || null
+    } catch (error) {
+      logger.error(`Error finding node for query "${query}" in graph ${graphId}:`, error)
+      throw error
     }
-
-    return results
-      .sort((a, b) => b.score - a.score)
-      .slice(0, options.maxResults || 10);
   }
 
   /**
-   * Get a specific node by exact ID
+   * Find nodes by type with efficient indexing
+   * @param graphId The ID of the graph to search in
+   * @param type The node type to find
+   * @param limit Maximum number of results
+   * @returns Array of matching nodes
    */
-  public async getNode(
+  public async findNodesByType(
     graphId: string,
-    nodeId: string
-  ): Promise<GraphNode | null> {
-    const nodeIndex = await this.getIndexForGraph(graphId)
-    if (!nodeIndex) return null
-
-    // Try direct lookup
-    const node = nodeIndex.get(nodeId);
-    if (node) return node;
-
-    // Try to find by name as fallback
-    const results = await this.findNodes(graphId, nodeId, {
-      maxResults: 1,
-      includeFuzzy: false,
-    })
-
-    return results.length > 0 ? results[0].node : null
-  }
-
-  /**
-   * Get nodes by type
-   */
-  public async getNodesByType(
-    graphId: string,
-    nodeType: string
+    type: string,
+    limit: number = 100
   ): Promise<GraphNode[]> {
-    const nodeIndex = await this.getIndexForGraph(graphId)
-    if (!nodeIndex) return []
-
-    return Array.from(nodeIndex.values()).filter(node => node.type === nodeType)
+    try {
+      const cache = await this.getCache(graphId)
+      
+      if (cache.byType.has(type)) {
+        return cache.byType.get(type)!.slice(0, limit)
+      }
+      
+      return []
+    } catch (error) {
+      logger.error(`Error finding nodes of type "${type}" in graph ${graphId}:`, error)
+      throw error
+    }
   }
 
   /**
-   * Get nodes defined in specific files
+   * Search for nodes by name pattern
+   * @param graphId The ID of the graph to search in
+   * @param namePattern String or regex pattern to match against node names
+   * @param type Optional node type to filter by
+   * @param limit Maximum number of results
+   * @returns Array of matching nodes
+   */
+  public async searchNodesByName(
+    graphId: string,
+    namePattern: string | RegExp,
+    type?: string,
+    limit: number = 100
+  ): Promise<GraphNode[]> {
+    try {
+      const cache = await this.getCache(graphId)
+      const pattern = typeof namePattern === 'string' 
+        ? new RegExp(namePattern.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'), 'i')
+        : namePattern
+      
+      let matches: GraphNode[] = []
+      
+      // If type is specified, search only within that type
+      if (type && cache.byType.has(type)) {
+        matches = cache.byType.get(type)!.filter(node => 
+          pattern.test(node.name)
+        )
+      } else {
+        // Search all nodes
+        for (const node of cache.byId.values()) {
+          if (pattern.test(node.name)) {
+            matches.push(node)
+            if (matches.length >= limit) break
+          }
+        }
+      }
+      
+      return matches.slice(0, limit)
+    } catch (error) {
+      logger.error(`Error searching nodes by name "${namePattern}" in graph ${graphId}:`, error)
+      throw error
+    }
+  }
+
+  /**
+   * Get nodes defined in a specific file
+   * @param graphId The ID of the graph to search in
+   * @param filePath The file path to find nodes for
+   * @returns Array of nodes defined in the file
    */
   public async getNodesInFile(
     graphId: string,
     filePath: string
   ): Promise<GraphNode[]> {
-    const nodeIndex = await this.getIndexForGraph(graphId)
-    if (!nodeIndex) return []
-
-    return Array.from(nodeIndex.values()).filter(node => 
-      node.file && node.file.includes(filePath)
-    )
+    try {
+      const cache = await this.getCache(graphId)
+      
+      // Normalize path (handle both / and \ separators)
+      const normalizedPath = filePath.replace(/\\/g, '/')
+      const backslashPath = filePath.replace(/\//g, '\\')
+      
+      // Try both path formats
+      for (const path of [filePath, normalizedPath, backslashPath]) {
+        if (cache.byFile.has(path)) {
+          return cache.byFile.get(path)!
+        }
+      }
+      
+      // Try partial matches
+      for (const [path, nodes] of cache.byFile.entries()) {
+        if (path.endsWith(filePath) || filePath.endsWith(path)) {
+          return nodes
+        }
+      }
+      
+      return []
+    } catch (error) {
+      logger.error(`Error getting nodes in file "${filePath}" in graph ${graphId}:`, error)
+      throw error
+    }
   }
 
   /**
-   * Clear the graph cache for a specific graph
+   * Invalidate the cache for a specific graph
+   * @param graphId The ID of the graph to invalidate cache for
    */
-  public clearGraphCache(graphId: string): void {
-    this.graphIndexCache.delete(graphId)
+  public invalidateCache(graphId: string): void {
+    this.caches.delete(graphId)
+    logger.info(`Cache invalidated for graph ${graphId}`)
   }
 
   /**
-   * Get or create an index for a graph
+   * Clear all caches
    */
-  private async getIndexForGraph(graphId: string): Promise<Map<string, GraphNode> | null> {
-    if (this.graphIndexCache.has(graphId)) {
-      return this.graphIndexCache.get(graphId) || null
-    }
-
-    const graph = await this.storage.getGraph(graphId)
-    if (!graph) {
-      logger.error(`Graph not found: ${graphId}`)
-      return null
-    }
-
-    // Create a simple map index of nodes by ID
-    const nodeIndex = new Map<string, GraphNode>()
-    for (const node of graph.nodes) {
-      nodeIndex.set(node.id, node)
-    }
-
-    this.graphIndexCache.set(graphId, nodeIndex)
-    return nodeIndex
-  }
-
-  /**
-   * Check if a node matches a query
-   */
-  private nodeMatchesQuery(node: GraphNode, query: string): boolean {
-    const queryLower = query.toLowerCase()
-    
-    // Check node ID
-    if (node.id.toLowerCase().includes(queryLower)) {
-      return true
-    }
-    
-    // Check node name
-    if (node.name.toLowerCase().includes(queryLower)) {
-      return true
-    }
-    
-    // Check file path
-    if (node.file && node.file.toLowerCase().includes(queryLower)) {
-      return true
-    }
-    
-    // Check documentation
-    if (node.metadata?.documentation && 
-        node.metadata.documentation.toLowerCase().includes(queryLower)) {
-      return true
-    }
-    
-    return false
-  }
-
-  /**
-   * Calculate a score for how well a node matches a query
-   */
-  private calculateScore(node: GraphNode, query: string): number {
-    const queryLower = query.toLowerCase()
-    
-    // Exact ID match
-    if (node.id.toLowerCase() === queryLower) {
-      return 1.0
-    }
-    
-    // Exact name match
-    if (node.name.toLowerCase() === queryLower) {
-      return 0.9
-    }
-    
-    // Partial ID match
-    if (node.id.toLowerCase().includes(queryLower)) {
-      return 0.7
-    }
-    
-    // Partial name match
-    if (node.name.toLowerCase().includes(queryLower)) {
-      return 0.6
-    }
-    
-    // File path match
-    if (node.file && node.file.toLowerCase().includes(queryLower)) {
-      return 0.4
-    }
-    
-    // Documentation match
-    if (node.metadata?.documentation && 
-        node.metadata.documentation.toLowerCase().includes(queryLower)) {
-      return 0.3
-    }
-    
-    return 0.1
+  public clearAllCaches(): void {
+    this.caches.clear()
+    logger.info('All node lookup caches cleared')
   }
 }
 
 // Singleton instance
-export const nodeLookup = NodeLookup.getInstance()
+export const nodeLookup = new NodeLookupService()
