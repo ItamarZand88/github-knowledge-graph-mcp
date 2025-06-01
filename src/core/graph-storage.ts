@@ -1,459 +1,347 @@
-/**
- * Graph storage service for persisting and retrieving knowledge graphs
- */
-import fs from 'fs/promises'
+import fs from 'fs-extra'
 import path from 'path'
-import { logger } from '../utils/logger.js'
+import { fileURLToPath } from 'url'
+import os from 'os'
 import type { KnowledgeGraph } from '../types/index.js'
+import { NodeIndex } from './node-index.js'
+import { logger } from '../utils/logger.js'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+
+export interface StoredGraph {
+  id: string
+  metadata: {
+    repository: string
+    branch: string
+    createdAt: string
+    fileCount: number
+    nodeCount: number
+    edgeCount: number
+    analysisTime: number
+  }
+  filePath: string
+}
 
 export class GraphStorage {
-  private baseDir: string
-  private graphs: Map<string, KnowledgeGraph> = new Map()
-  private metadata: Map<string, {
-    created: Date
-    updated: Date
-    repository?: string
-    size: {
-      nodes: number
-      edges: number
-    }
-  }> = new Map()
+  private storageDir: string
+  private indexFilePath: string
+  private indexCache = new Map<string, NodeIndex>()
 
-  constructor(baseDir?: string) {
-    this.baseDir = baseDir || path.join(process.cwd(), 'data', 'graphs')
-    this.initStorage()
+  constructor(storageDir?: string) {
+    // Use environment variable MCP_DATA_DIR or fall back to default
+    const homeDir = os.homedir()
+    const defaultDir = path.join(
+      homeDir,
+      '.github-knowledge-graph',
+      'data',
+      'graphs'
+    )
+
+    this.storageDir = storageDir || process.env.MCP_DATA_DIR || defaultDir
+
+    this.indexFilePath = path.join(this.storageDir, 'index.json')
+    this.ensureStorageDirectory()
+    logger.info(`Graph storage directory: ${this.storageDir}`)
   }
 
-  /**
-   * Initialize storage by creating directories if they don't exist
-   */
-  private async initStorage(): Promise<void> {
-    try {
-      await fs.mkdir(this.baseDir, { recursive: true })
-      logger.info(`Graph storage initialized at ${this.baseDir}`)
-      await this.loadMetadata()
-    } catch (error) {
-      logger.error('Error initializing graph storage:', error)
-      throw error
+  private async ensureStorageDirectory(): Promise<void> {
+    await fs.ensureDir(this.storageDir)
+
+    // Create index file if it doesn't exist
+    if (!(await fs.pathExists(this.indexFilePath))) {
+      await fs.writeJson(this.indexFilePath, [])
     }
   }
 
-  /**
-   * Load metadata for all graphs
-   */
-  private async loadMetadata(): Promise<void> {
+  async saveGraph(graph: KnowledgeGraph): Promise<string> {
+    await this.ensureStorageDirectory()
+
+    // Generate unique ID
+    const timestamp = Date.now()
+    const repoName = this.extractRepoName(graph.metadata.repository)
+    const graphId = `${repoName}-${timestamp}`
+
+    // Save graph data
+    const graphFilePath = path.join(this.storageDir, `${graphId}.json`)
+    await fs.writeJson(graphFilePath, graph, { spaces: 2 })
+
+    // Update index
+    const index = await this.loadIndex()
+    const storedGraph: StoredGraph = {
+      id: graphId,
+      metadata: {
+        repository: graph.metadata.repository,
+        branch: graph.metadata.branch || 'main',
+        createdAt: new Date().toISOString(),
+        fileCount: graph.metadata.fileCount,
+        nodeCount: graph.metadata.nodeCount,
+        edgeCount: graph.metadata.edgeCount,
+        analysisTime: graph.metadata.analysisTime,
+      },
+      filePath: graphFilePath,
+    }
+
+    index.push(storedGraph)
+    await fs.writeJson(this.indexFilePath, index, { spaces: 2 })
+
+    return graphId
+  }
+
+  async getGraph(graphId: string): Promise<KnowledgeGraph | null> {
     try {
-      const metadataFile = path.join(this.baseDir, 'metadata.json')
-      const exists = await this.fileExists(metadataFile)
-      
-      if (exists) {
-        const data = await fs.readFile(metadataFile, 'utf-8')
-        const parsed = JSON.parse(data)
-        
-        // Convert to Map
-        for (const [id, meta] of Object.entries(parsed)) {
-          this.metadata.set(id, {
-            ...(meta as any),
-            created: new Date((meta as any).created),
-            updated: new Date((meta as any).updated)
-          })
-        }
-        
-        logger.info(`Loaded metadata for ${this.metadata.size} graphs`)
-      } else {
-        logger.info('No metadata file found, creating a new one')
-        await this.saveMetadata()
+      const index = await this.loadIndex()
+      const storedGraph = index.find(g => g.id === graphId)
+
+      if (!storedGraph) {
+        return null
       }
-    } catch (error) {
-      logger.error('Error loading graph metadata:', error)
-      throw error
-    }
-  }
 
-  /**
-   * Save metadata for all graphs
-   */
-  private async saveMetadata(): Promise<void> {
-    try {
-      const metadataFile = path.join(this.baseDir, 'metadata.json')
-      
-      // Convert Map to object
-      const metadataObj: Record<string, any> = {}
-      for (const [id, meta] of this.metadata.entries()) {
-        metadataObj[id] = meta
+      if (!(await fs.pathExists(storedGraph.filePath))) {
+        // Remove from index if file doesn't exist
+        await this.removeFromIndex(graphId)
+        return null
       }
-      
-      await fs.writeFile(metadataFile, JSON.stringify(metadataObj, null, 2))
-      logger.info(`Saved metadata for ${this.metadata.size} graphs`)
+
+      return await fs.readJson(storedGraph.filePath)
     } catch (error) {
-      logger.error('Error saving graph metadata:', error)
-      throw error
+      console.error('Error loading graph:', error)
+      return null
     }
   }
 
-  /**
-   * Check if a file exists
-   * @param filePath Path to the file
-   * @returns True if the file exists, false otherwise
-   */
-  private async fileExists(filePath: string): Promise<boolean> {
+  async deleteGraph(graphId: string): Promise<boolean> {
     try {
-      await fs.access(filePath)
+      const index = await this.loadIndex()
+      const storedGraph = index.find(g => g.id === graphId)
+
+      if (!storedGraph) {
+        return false
+      }
+
+      // Remove file
+      if (await fs.pathExists(storedGraph.filePath)) {
+        await fs.remove(storedGraph.filePath)
+      }
+
+      // Remove from index
+      await this.removeFromIndex(graphId)
       return true
-    } catch {
+    } catch (error) {
+      console.error('Error deleting graph:', error)
       return false
     }
   }
 
-  /**
-   * Save a graph to storage
-   * @param id ID of the graph
-   * @param graph Graph to save
-   * @param metadata Optional metadata for the graph
-   * @returns True if saved successfully
-   */
-  public async saveGraph(
-    id: string,
-    graph: KnowledgeGraph,
-    metadata: {
-      repository?: string
-    } = {}
-  ): Promise<boolean> {
+  async listGraphs(): Promise<StoredGraph[]> {
     try {
-      // Save to memory
-      this.graphs.set(id, graph)
-      
-      // Update metadata
-      const now = new Date()
-      const existing = this.metadata.get(id)
-      
-      this.metadata.set(id, {
-        created: existing?.created || now,
-        updated: now,
-        repository: metadata.repository || existing?.repository,
-        size: {
-          nodes: graph.nodes.length,
-          edges: graph.edges.length
+      const index = await this.loadIndex()
+
+      // Verify files still exist and clean up index
+      const validGraphs: StoredGraph[] = []
+      for (const graph of index) {
+        if (await fs.pathExists(graph.filePath)) {
+          validGraphs.push(graph)
         }
-      })
-      
-      // Save to disk
-      const graphDir = path.join(this.baseDir, id)
-      await fs.mkdir(graphDir, { recursive: true })
-      
-      // Split the graph into chunks for better performance with large graphs
-      await this.saveGraphChunks(id, graph)
-      
-      // Save metadata
-      await this.saveMetadata()
-      
-      logger.info(`Saved graph ${id} with ${graph.nodes.length} nodes and ${graph.edges.length} edges`)
-      return true
-    } catch (error) {
-      logger.error(`Error saving graph ${id}:`, error)
-      throw error
-    }
-  }
-
-  /**
-   * Save a graph in chunks to improve performance with large graphs
-   * @param id ID of the graph
-   * @param graph Graph to save
-   */
-  private async saveGraphChunks(id: string, graph: KnowledgeGraph): Promise<void> {
-    const graphDir = path.join(this.baseDir, id)
-    
-    // Save graph info
-    const infoFile = path.join(graphDir, 'info.json')
-    await fs.writeFile(infoFile, JSON.stringify({
-      id,
-      nodeCount: graph.nodes.length,
-      edgeCount: graph.edges.length
-    }, null, 2))
-    
-    // Save nodes in chunks of 5000
-    const nodeChunks: GraphNode[][] = []
-    for (let i = 0; i < graph.nodes.length; i += 5000) {
-      nodeChunks.push(graph.nodes.slice(i, i + 5000))
-    }
-    
-    for (let i = 0; i < nodeChunks.length; i++) {
-      const nodeFile = path.join(graphDir, `nodes_${i}.json`)
-      await fs.writeFile(nodeFile, JSON.stringify(nodeChunks[i], null, 2))
-    }
-    
-    // Save edges in chunks of 10000
-    const edgeChunks: GraphEdge[][] = []
-    for (let i = 0; i < graph.edges.length; i += 10000) {
-      edgeChunks.push(graph.edges.slice(i, i + 10000))
-    }
-    
-    for (let i = 0; i < edgeChunks.length; i++) {
-      const edgeFile = path.join(graphDir, `edges_${i}.json`)
-      await fs.writeFile(edgeFile, JSON.stringify(edgeChunks[i], null, 2))
-    }
-    
-    // Save chunk info
-    const chunksFile = path.join(graphDir, 'chunks.json')
-    await fs.writeFile(chunksFile, JSON.stringify({
-      nodeChunks: nodeChunks.length,
-      edgeChunks: edgeChunks.length
-    }, null, 2))
-  }
-
-  /**
-   * Get a graph from storage
-   * @param id ID of the graph to get
-   * @returns The graph or null if not found
-   */
-  public async getGraph(id: string): Promise<KnowledgeGraph | null> {
-    try {
-      // Check memory cache first
-      if (this.graphs.has(id)) {
-        return this.graphs.get(id)!
       }
-      
-      // Check if graph exists on disk
-      const graphDir = path.join(this.baseDir, id)
-      const exists = await this.fileExists(graphDir)
-      
-      if (!exists) {
-        logger.warn(`Graph ${id} not found in storage`)
-        return null
+
+      // Update index if some files were missing
+      if (validGraphs.length !== index.length) {
+        await fs.writeJson(this.indexFilePath, validGraphs, { spaces: 2 })
       }
-      
-      // Load graph from chunks
-      const graph = await this.loadGraphChunks(id)
-      
-      // Cache in memory
-      this.graphs.set(id, graph)
-      
-      logger.info(`Loaded graph ${id} with ${graph.nodes.length} nodes and ${graph.edges.length} edges`)
-      return graph
+
+      return validGraphs.sort(
+        (a, b) =>
+          new Date(b.metadata.createdAt).getTime() -
+          new Date(a.metadata.createdAt).getTime()
+      )
     } catch (error) {
-      logger.error(`Error getting graph ${id}:`, error)
-      throw error
+      console.error('Error listing graphs:', error)
+      return []
     }
   }
 
-  /**
-   * Load a graph from chunks
-   * @param id ID of the graph to load
-   * @returns The loaded graph
-   */
-  private async loadGraphChunks(id: string): Promise<KnowledgeGraph> {
-    const graphDir = path.join(this.baseDir, id)
-    
-    // Load chunk info
-    const chunksFile = path.join(graphDir, 'chunks.json')
-    const chunksExists = await this.fileExists(chunksFile)
-    
-    if (!chunksExists) {
-      // Old format or single file
-      const graphFile = path.join(graphDir, 'graph.json')
-      const exists = await this.fileExists(graphFile)
-      
-      if (exists) {
-        const data = await fs.readFile(graphFile, 'utf-8')
-        return JSON.parse(data)
+  async getGraphsByRepository(repository: string): Promise<StoredGraph[]> {
+    const allGraphs = await this.listGraphs()
+    return allGraphs.filter(graph =>
+      graph.metadata.repository.toLowerCase().includes(repository.toLowerCase())
+    )
+  }
+
+  async cleanupOldGraphs(
+    maxAge: number = 30 * 24 * 60 * 60 * 1000
+  ): Promise<number> {
+    const index = await this.loadIndex()
+    const cutoffDate = new Date(Date.now() - maxAge)
+    let deletedCount = 0
+
+    for (const graph of index) {
+      const createdAt = new Date(graph.metadata.createdAt)
+      if (createdAt < cutoffDate) {
+        if (await this.deleteGraph(graph.id)) {
+          deletedCount++
+        }
       }
-      
-      throw new Error(`Graph ${id} not found or invalid format`)
     }
-    
-    const chunksData = await fs.readFile(chunksFile, 'utf-8')
-    const chunks = JSON.parse(chunksData)
-    
-    // Load nodes
-    let nodes: GraphNode[] = []
-    for (let i = 0; i < chunks.nodeChunks; i++) {
-      const nodeFile = path.join(graphDir, `nodes_${i}.json`)
-      const nodeData = await fs.readFile(nodeFile, 'utf-8')
-      const nodeChunk = JSON.parse(nodeData)
-      nodes = nodes.concat(nodeChunk)
-    }
-    
-    // Load edges
-    let edges: GraphEdge[] = []
-    for (let i = 0; i < chunks.edgeChunks; i++) {
-      const edgeFile = path.join(graphDir, `edges_${i}.json`)
-      const edgeData = await fs.readFile(edgeFile, 'utf-8')
-      const edgeChunk = JSON.parse(edgeData)
-      edges = edges.concat(edgeChunk)
-    }
-    
-    return { nodes, edges }
+
+    return deletedCount
   }
 
-  /**
-   * Delete a graph from storage
-   * @param id ID of the graph to delete
-   * @returns True if deleted successfully
-   */
-  public async deleteGraph(id: string): Promise<boolean> {
-    try {
-      // Remove from memory
-      this.graphs.delete(id)
-      this.metadata.delete(id)
-      
-      // Remove from disk
-      const graphDir = path.join(this.baseDir, id)
-      const exists = await this.fileExists(graphDir)
-      
-      if (exists) {
-        await fs.rm(graphDir, { recursive: true, force: true })
+  async getStorageStats(): Promise<{
+    totalGraphs: number
+    totalSizeBytes: number
+    oldestGraph: string | null
+    newestGraph: string | null
+  }> {
+    const graphs = await this.listGraphs()
+    let totalSize = 0
+
+    for (const graph of graphs) {
+      try {
+        const stats = await fs.stat(graph.filePath)
+        totalSize += stats.size
+      } catch (error) {
+        // File might be missing, skip
       }
-      
-      // Save updated metadata
-      await this.saveMetadata()
-      
-      logger.info(`Deleted graph ${id}`)
-      return true
-    } catch (error) {
-      logger.error(`Error deleting graph ${id}:`, error)
-      throw error
+    }
+
+    return {
+      totalGraphs: graphs.length,
+      totalSizeBytes: totalSize,
+      oldestGraph: graphs.length > 0 ? graphs[graphs.length - 1].id : null,
+      newestGraph: graphs.length > 0 ? graphs[0].id : null,
     }
   }
 
-  /**
-   * List all available graphs
-   * @returns List of graph IDs and metadata
-   */
-  public async listGraphs(): Promise<Array<{
-    id: string
-    created: Date
-    updated: Date
-    repository?: string
-    size: {
-      nodes: number
-      edges: number
-    }
-  }>> {
+  private async loadIndex(): Promise<StoredGraph[]> {
     try {
-      return Array.from(this.metadata.entries()).map(([id, meta]) => ({
-        id,
-        ...meta
-      }))
+      return await fs.readJson(this.indexFilePath)
     } catch (error) {
-      logger.error('Error listing graphs:', error)
-      throw error
+      // If index is corrupted, recreate it
+      await fs.writeJson(this.indexFilePath, [])
+      return []
     }
   }
 
-  /**
-   * Get metadata for a specific graph
-   * @param id ID of the graph to get metadata for
-   * @returns Graph metadata or null if not found
-   */
-  public async getGraphMetadata(id: string): Promise<{
-    created: Date
-    updated: Date
-    repository?: string
-    size: {
-      nodes: number
-      edges: number
-    }
-  } | null> {
-    return this.metadata.get(id) || null
+  private async removeFromIndex(graphId: string): Promise<void> {
+    const index = await this.loadIndex()
+    const filteredIndex = index.filter(g => g.id !== graphId)
+    await fs.writeJson(this.indexFilePath, filteredIndex, { spaces: 2 })
   }
 
-  /**
-   * Update metadata for a specific graph
-   * @param id ID of the graph to update metadata for
-   * @param metadata Metadata to update
-   * @returns True if updated successfully
-   */
-  public async updateGraphMetadata(
-    id: string,
-    metadata: {
-      repository?: string
-    }
-  ): Promise<boolean> {
+  private extractRepoName(repository: string): string {
     try {
-      const existing = this.metadata.get(id)
-      
-      if (!existing) {
-        logger.warn(`Graph ${id} not found, cannot update metadata`)
+      // Extract repo name from GitHub URL
+      const match = repository.match(/github\.com[\/:]([^\/]+)\/([^\/\.]+)/)
+      if (match) {
+        return `${match[1]}-${match[2]}`
+      }
+
+      // Fallback to simple extraction
+      return (
+        repository
+          .split('/')
+          .pop()
+          ?.replace(/\.git$/, '') || 'unknown-repo'
+      )
+    } catch (error) {
+      return 'unknown-repo'
+    }
+  }
+
+  async exportGraph(graphId: string, outputPath: string): Promise<boolean> {
+    try {
+      const graph = await this.getGraph(graphId)
+      if (!graph) {
         return false
       }
-      
-      this.metadata.set(id, {
-        ...existing,
-        updated: new Date(),
-        repository: metadata.repository || existing.repository
-      })
-      
-      await this.saveMetadata()
-      
-      logger.info(`Updated metadata for graph ${id}`)
+
+      await fs.writeJson(outputPath, graph, { spaces: 2 })
       return true
     } catch (error) {
-      logger.error(`Error updating metadata for graph ${id}:`, error)
-      throw error
+      console.error('Error exporting graph:', error)
+      return false
+    }
+  }
+
+  async importGraph(
+    filePath: string,
+    metadata?: Partial<StoredGraph['metadata']>
+  ): Promise<string | null> {
+    try {
+      if (!(await fs.pathExists(filePath))) {
+        throw new Error('Import file does not exist')
+      }
+
+      const graph: KnowledgeGraph = await fs.readJson(filePath)
+
+      // Validate graph structure
+      if (!graph.nodes || !graph.edges || !graph.metadata) {
+        throw new Error('Invalid graph format')
+      }
+
+      // Update metadata if provided
+      if (metadata) {
+        graph.metadata = { ...graph.metadata, ...metadata }
+      }
+
+      return await this.saveGraph(graph)
+    } catch (error) {
+      console.error('Error importing graph:', error)
+      return null
     }
   }
 
   /**
-   * Get a slice of a graph (limited nodes and edges)
-   * @param id ID of the graph to slice
-   * @param options Slice options
-   * @returns Sliced graph or null if not found
+   * Get a graph with its indexed nodes for fast lookups
    */
-  public async getGraphSlice(
-    id: string,
-    options: {
-      nodeLimit?: number
-      edgeLimit?: number
-      nodeTypes?: string[]
-      edgeTypes?: string[]
-    } = {}
-  ): Promise<KnowledgeGraph | null> {
-    try {
-      const graph = await this.getGraph(id)
-      
-      if (!graph) {
-        return null
-      }
-      
-      // Default limits
-      const nodeLimit = options.nodeLimit || 1000
-      const edgeLimit = options.edgeLimit || 2000
-      
-      // Filter nodes by type if specified
-      let nodes = options.nodeTypes && options.nodeTypes.length > 0
-        ? graph.nodes.filter(node => options.nodeTypes!.includes(node.type))
-        : graph.nodes
-      
-      // Limit nodes
-      nodes = nodes.slice(0, nodeLimit)
-      
-      // Get node IDs for edge filtering
-      const nodeIds = new Set(nodes.map(node => node.id))
-      
-      // Filter edges
-      let edges = graph.edges.filter(edge => 
-        nodeIds.has(edge.from) && nodeIds.has(edge.to)
-      )
-      
-      // Filter edges by type if specified
-      if (options.edgeTypes && options.edgeTypes.length > 0) {
-        edges = edges.filter(edge => options.edgeTypes!.includes(edge.type))
-      }
-      
-      // Limit edges
-      edges = edges.slice(0, edgeLimit)
-      
-      return {
-        nodes,
-        edges
-      }
-    } catch (error) {
-      logger.error(`Error getting graph slice for ${id}:`, error)
-      throw error
+  async getIndexedGraph(graphId: string): Promise<NodeIndex | null> {
+    // Check cache first
+    if (this.indexCache.has(graphId)) {
+      return this.indexCache.get(graphId)!
+    }
+
+    // Load graph and create index
+    const graph = await this.getGraph(graphId)
+    if (!graph) {
+      return null
+    }
+
+    logger.info(`Creating node index for graph: ${graphId}`)
+    const nodeIndex = new NodeIndex(graph)
+
+    // Cache the index
+    this.indexCache.set(graphId, nodeIndex)
+
+    return nodeIndex
+  }
+
+  /**
+   * Clear the index cache for a specific graph
+   */
+  clearGraphCache(graphId: string): void {
+    this.indexCache.delete(graphId)
+  }
+
+  /**
+   * Clear all cached indexes
+   */
+  clearAllCaches(): void {
+    this.indexCache.clear()
+  }
+
+  /**
+   * Get cache statistics
+   */
+  getCacheStats(): {
+    cachedGraphs: number
+    totalMemoryUsage: string
+    cacheHitRate?: number
+  } {
+    return {
+      cachedGraphs: this.indexCache.size,
+      totalMemoryUsage: `${this.indexCache.size} graphs indexed`,
+      // In a production system, you'd track actual memory usage and hit rates
     }
   }
 }
-
-// For type augmentation
-type GraphNode = any
-type GraphEdge = any
