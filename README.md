@@ -89,6 +89,63 @@ npm run dev
 npm start
 ```
 
+## 🔌 Integrating with AI Tools
+
+### Adding to Claude Desktop
+
+To add the GitHub Knowledge Graph MCP server to Claude Desktop:
+
+1. Install the server globally (recommended for easier integration):
+
+```bash
+npm install -g github-knowledge-graph-mcp
+```
+
+2. Open the Claude Desktop configuration file:
+   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Linux: `~/.config/Claude/claude_desktop_config.json`
+
+3. Add the following to the `mcpServers` section:
+
+```json
+"github-knowledge-graph": {
+  "command": "github-knowledge-graph-mcp",
+  "args": [],
+  "env": {
+    "MCP_PORT": "3010",
+    "MCP_DATA_DIR": "/path/to/your/data/directory"
+  }
+}
+```
+
+Alternatively, if you didn't install globally, you can run it from your local installation:
+
+```json
+"github-knowledge-graph": {
+  "command": "node",
+  "args": ["/path/to/github-knowledge-graph-mcp/dist/index.js"],
+  "env": {
+    "MCP_PORT": "3010",
+    "MCP_DATA_DIR": "/path/to/your/data/directory"
+  }
+}
+```
+
+4. Save the file and restart Claude Desktop
+
+### Using with Other MCP-compatible Tools
+
+For other tools that support Model Context Protocol:
+
+1. Start the server:
+
+```bash
+github-knowledge-graph-mcp
+```
+
+2. Configure the tool to connect to the server at `http://localhost:3010` (or your configured host/port)
+
 ## 🔍 Using the MCP API
 
 The server exposes a Model Context Protocol compatible API that can be used to interact with knowledge graphs.
