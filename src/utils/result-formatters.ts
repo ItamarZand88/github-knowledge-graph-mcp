@@ -6,54 +6,52 @@ import type {
   GraphNode,
   GraphEdge,
   ExplorationResult,
-  CircularDependency
-} from '../types/index.js'
-import { DependencyResult } from '../core/dependency-analyzer.js'
+  CircularDependency,
+} from "../types/index.js";
+import { DependencyResult } from "../core/dependency-analyzer.js";
 
 /**
  * Format exploration result for JSON output
  * @param result Exploration result to format
  * @returns Formatted result for JSON output
  */
-export function formatExplorationResult(
-  result: ExplorationResult
-): {
-  rootNode: string | null
-  nodeCount: number
-  edgeCount: number
-  truncated: boolean
+export function formatExplorationResult(result: ExplorationResult): {
+  rootNode: string | null;
+  nodeCount: number;
+  edgeCount: number;
+  truncated: boolean;
   nodes: Array<{
-    id: string
-    name: string
-    type: string
-    file?: string
-    description?: string
-  }>
+    id: string;
+    name: string;
+    type: string;
+    file?: string;
+    description?: string;
+  }>;
   edges: Array<{
-    from: string
-    to: string
-    type: string
-  }>
+    from: string;
+    to: string;
+    type: string;
+  }>;
   metadata: {
-    exploredDepth: number
-    totalGraphSize: number
-  }
+    exploredDepth: number;
+    totalGraphSize: number;
+  };
 } {
   // Format the nodes with only essential information
-  const formattedNodes = result.nodes.map(node => ({
+  const formattedNodes = result.nodes.map((node) => ({
     id: node.id,
     name: node.name,
     type: node.type,
     file: node.file,
-    description: node.description
-  }))
+    description: node.metadata?.documentation,
+  }));
 
   // Format the edges
-  const formattedEdges = result.edges.map(edge => ({
+  const formattedEdges = result.edges.map((edge) => ({
     from: edge.from,
     to: edge.to,
-    type: edge.type
-  }))
+    type: edge.type,
+  }));
 
   return {
     rootNode: result.rootId,
@@ -64,9 +62,9 @@ export function formatExplorationResult(
     edges: formattedEdges,
     metadata: {
       exploredDepth: result.exploredDepth,
-      totalGraphSize: result.totalNodesCount
-    }
-  }
+      totalGraphSize: result.totalNodesCount,
+    },
+  };
 }
 
 /**
@@ -74,62 +72,60 @@ export function formatExplorationResult(
  * @param result Dependency analysis result to format
  * @returns Formatted result for JSON output
  */
-export function formatDependencyResult(
-  result: DependencyResult
-): {
+export function formatDependencyResult(result: DependencyResult): {
   node: {
-    name: string
-    type: string
-  }
+    name: string;
+    type: string;
+  };
   dependencies: {
     incoming: Array<{
-      name: string
-      type: string
-      relationship: string
-    }>
+      name: string;
+      type: string;
+      relationship: string;
+    }>;
     outgoing: Array<{
-      name: string
-      type: string
-      relationship: string
-    }>
-  }
+      name: string;
+      type: string;
+      relationship: string;
+    }>;
+  };
   stats: {
-    directDependencies: number
-    transitiveDependencies: number
-    maxDepth: number
-  }
-  criticalPath?: string[]
+    directDependencies: number;
+    transitiveDependencies: number;
+    maxDepth: number;
+  };
+  criticalPath?: string[];
 } {
   // Format incoming dependencies
-  const incoming = result.incoming.map(dep => ({
+  const incoming = result.incoming.map((dep) => ({
     name: dep.name,
     type: dep.type,
-    relationship: dep.relationship
-  }))
+    relationship: dep.relationship,
+  }));
 
   // Format outgoing dependencies
-  const outgoing = result.outgoing.map(dep => ({
+  const outgoing = result.outgoing.map((dep) => ({
     name: dep.name,
     type: dep.type,
-    relationship: dep.relationship
-  }))
+    relationship: dep.relationship,
+  }));
 
   return {
     node: {
       name: result.nodeName,
-      type: result.nodeType
+      type: result.nodeType,
     },
     dependencies: {
       incoming,
-      outgoing
+      outgoing,
     },
     stats: {
       directDependencies: result.directDependencies,
       transitiveDependencies: result.transitiveDependencies,
-      maxDepth: result.maxDepth
+      maxDepth: result.maxDepth,
     },
-    criticalPath: result.criticalPath
-  }
+    criticalPath: result.criticalPath,
+  };
 }
 
 /**
@@ -137,47 +133,45 @@ export function formatDependencyResult(
  * @param cycles Circular dependencies to format
  * @returns Formatted result for JSON output
  */
-export function formatCircularDependencies(
-  result: {
-    cycles: CircularDependency[]
-    totalCycles: number
-    byCriticality: {
-      high: number
-      medium: number
-      low: number
-    }
-  }
-): {
+export function formatCircularDependencies(result: {
+  cycles: CircularDependency[];
+  totalCycles: number;
+  byCriticality: {
+    high: number;
+    medium: number;
+    low: number;
+  };
+}): {
   summary: {
-    totalCycles: number
-    highSeverity: number
-    mediumSeverity: number
-    lowSeverity: number
-  }
+    totalCycles: number;
+    highSeverity: number;
+    mediumSeverity: number;
+    lowSeverity: number;
+  };
   cycles: Array<{
-    path: string[]
-    severity: string
-    length: number
-    involvedTypes: string[]
-  }>
+    path: string[];
+    severity: string;
+    length: number;
+    involvedTypes: string[];
+  }>;
 } {
   // Format cycles
-  const formattedCycles = result.cycles.map(cycle => ({
-    path: cycle.path.map(node => node.name),
+  const formattedCycles = result.cycles.map((cycle) => ({
+    path: cycle.path.map((node) => node.name),
     severity: cycle.severity,
     length: cycle.cycleLength,
-    involvedTypes: cycle.involvedTypes
-  }))
+    involvedTypes: cycle.involvedTypes,
+  }));
 
   return {
     summary: {
       totalCycles: result.totalCycles,
       highSeverity: result.byCriticality.high,
       mediumSeverity: result.byCriticality.medium,
-      lowSeverity: result.byCriticality.low
+      lowSeverity: result.byCriticality.low,
     },
-    cycles: formattedCycles
-  }
+    cycles: formattedCycles,
+  };
 }
 
 /**
@@ -185,64 +179,66 @@ export function formatCircularDependencies(
  * @param stats Graph statistics to format
  * @returns Formatted result for JSON output
  */
-export function formatGraphStatistics(
-  stats: {
-    totalNodes: number
-    totalEdges: number
-    nodeTypes: Record<string, number>
-    edgeTypes: Record<string, number>
-    avgConnections: number
-    mostConnectedNodes: Array<{
-      id: string
-      name: string
-      type: string
-      connections: number
-    }>
-  }
-): {
-  summary: {
-    totalNodes: number
-    totalEdges: number
-    averageConnections: number
-    nodeTypesCount: number
-    edgeTypesCount: number
-  }
-  nodeTypes: Array<{
-    type: string
-    count: number
-    percentage: number
-  }>
-  edgeTypes: Array<{
-    type: string
-    count: number
-    percentage: number
-  }>
+export function formatGraphStatistics(stats: {
+  totalNodes: number;
+  totalEdges: number;
+  nodeTypes: Record<string, number>;
+  edgeTypes: Record<string, number>;
+  avgConnections: number;
   mostConnectedNodes: Array<{
-    name: string
-    type: string
-    connections: number
-  }>
+    id: string;
+    name: string;
+    type: string;
+    connections: number;
+  }>;
+}): {
+  summary: {
+    totalNodes: number;
+    totalEdges: number;
+    averageConnections: number;
+    nodeTypesCount: number;
+    edgeTypesCount: number;
+  };
+  nodeTypes: Array<{
+    type: string;
+    count: number;
+    percentage: number;
+  }>;
+  edgeTypes: Array<{
+    type: string;
+    count: number;
+    percentage: number;
+  }>;
+  mostConnectedNodes: Array<{
+    name: string;
+    type: string;
+    connections: number;
+  }>;
 } {
   // Format node types
-  const formattedNodeTypes = Object.entries(stats.nodeTypes).map(([type, count]) => ({
-    type,
-    count,
-    percentage: Math.round((count / stats.totalNodes) * 100)
-  })).sort((a, b) => b.count - a.count)
+  const formattedNodeTypes = Object.entries(stats.nodeTypes)
+    .map(([type, count]) => ({
+      type,
+      count,
+      percentage: Math.round((count / stats.totalNodes) * 100),
+    }))
+    .sort((a, b) => b.count - a.count);
 
   // Format edge types
-  const formattedEdgeTypes = Object.entries(stats.edgeTypes).map(([type, count]) => ({
-    type,
-    count,
-    percentage: Math.round((count / stats.totalEdges) * 100)
-  })).sort((a, b) => b.count - a.count)
+  const formattedEdgeTypes = Object.entries(stats.edgeTypes)
+    .map(([type, count]) => ({
+      type,
+      count,
+      percentage: Math.round((count / stats.totalEdges) * 100),
+    }))
+    .sort((a, b) => b.count - a.count);
 
   // Format most connected nodes
-  const formattedMostConnectedNodes = stats.mostConnectedNodes.map(node => ({
+  const formattedMostConnectedNodes = stats.mostConnectedNodes.map((node) => ({
     name: node.name,
     type: node.type,
-    connections: node.connections
-  }))
+    connections: node.connections,
+  }));
 
   return {
     summary: {
@@ -250,12 +246,12 @@ export function formatGraphStatistics(
       totalEdges: stats.totalEdges,
       averageConnections: Math.round(stats.avgConnections * 10) / 10,
       nodeTypesCount: Object.keys(stats.nodeTypes).length,
-      edgeTypesCount: Object.keys(stats.edgeTypes).length
+      edgeTypesCount: Object.keys(stats.edgeTypes).length,
     },
     nodeTypes: formattedNodeTypes,
     edgeTypes: formattedEdgeTypes,
-    mostConnectedNodes: formattedMostConnectedNodes
-  }
+    mostConnectedNodes: formattedMostConnectedNodes,
+  };
 }
 
 /**
@@ -263,108 +259,110 @@ export function formatGraphStatistics(
  * @param details Node details to format
  * @returns Formatted result for JSON output
  */
-export function formatNodeDetails(
-  details: {
-    node: GraphNode | null
-    incomingEdges: Array<{
-      edge: GraphEdge
-      fromNode: GraphNode
-    }>
-    outgoingEdges: Array<{
-      edge: GraphEdge
-      toNode: GraphNode
-    }>
-    siblings: GraphNode[]
-    file?: {
-      path: string
-      nodes: GraphNode[]
-    }
-  }
-): {
+export function formatNodeDetails(details: {
+  node: GraphNode | null;
+  incomingEdges: Array<{
+    edge: GraphEdge;
+    fromNode: GraphNode;
+  }>;
+  outgoingEdges: Array<{
+    edge: GraphEdge;
+    toNode: GraphNode;
+  }>;
+  siblings: GraphNode[];
+  file?: {
+    path: string;
+    nodes: GraphNode[];
+  };
+}): {
   node: {
-    id: string
-    name: string
-    type: string
-    file?: string
-    description?: string
-    metadata?: Record<string, any>
-  } | null
+    id: string;
+    name: string;
+    type: string;
+    file?: string;
+    description?: string;
+    metadata?: Record<string, any>;
+  } | null;
   relationships: {
     incoming: Array<{
-      name: string
-      type: string
-      relationship: string
-    }>
+      name: string;
+      type: string;
+      relationship: string;
+    }>;
     outgoing: Array<{
-      name: string
-      type: string
-      relationship: string
-    }>
-  }
+      name: string;
+      type: string;
+      relationship: string;
+    }>;
+  };
   context: {
     siblings: Array<{
-      name: string
-      type: string
-    }>
+      name: string;
+      type: string;
+    }>;
     file?: {
-      path: string
+      path: string;
       nodes: Array<{
-        name: string
-        type: string
-      }>
-    }
-  }
+        name: string;
+        type: string;
+      }>;
+    };
+  };
 } {
   // Format node
-  const formattedNode = details.node ? {
-    id: details.node.id,
-    name: details.node.name,
-    type: details.node.type,
-    file: details.node.file,
-    description: details.node.description,
-    metadata: details.node.metadata
-  } : null
+  const formattedNode = details.node
+    ? {
+        id: details.node.id,
+        name: details.node.name,
+        type: details.node.type,
+        file: details.node.file,
+        description: details.node.metadata?.documentation,
+        metadata: details.node.metadata,
+      }
+    : null;
 
   // Format incoming relationships
   const incoming = details.incomingEdges.map(({ edge, fromNode }) => ({
     name: fromNode.name,
     type: fromNode.type,
-    relationship: edge.type
-  }))
+    relationship: edge.type,
+  }));
 
   // Format outgoing relationships
   const outgoing = details.outgoingEdges.map(({ edge, toNode }) => ({
     name: toNode.name,
     type: toNode.type,
-    relationship: edge.type
-  }))
+    relationship: edge.type,
+  }));
 
   // Format siblings
-  const siblings = details.siblings.map(node => ({
+  const siblings = details.siblings.map((node) => ({
     name: node.name,
-    type: node.type
-  }))
+    type: node.type,
+  }));
 
   // Format file nodes
-  const file = details.file ? {
-    path: details.file.path,
-    nodes: details.file.nodes.map(node => ({
-      name: node.name,
-      type: node.type
-    }))
-  } : undefined
+  const file = details.file
+    ? {
+        path: details.file.path,
+        nodes: details.file.nodes.map((node) => ({
+          name: node.name,
+          type: node.type,
+        })),
+      }
+    : undefined;
 
   return {
     node: formattedNode,
     relationships: {
       incoming,
-      outgoing
+      outgoing,
     },
     context: {
       siblings,
-      file
-    }
-  }
+      file,
+    },
+  };
 }
 
 /**
@@ -372,45 +370,43 @@ export function formatNodeDetails(
  * @param pathResult Path result to format
  * @returns Formatted result for JSON output
  */
-export function formatPathResult(
-  pathResult: {
-    path: GraphNode[]
-    edges: GraphEdge[]
-    length: number
-    found: boolean
-  }
-): {
-  found: boolean
-  pathLength: number
+export function formatPathResult(pathResult: {
+  path: GraphNode[];
+  edges: GraphEdge[];
+  length: number;
+  found: boolean;
+}): {
+  found: boolean;
+  pathLength: number;
   nodes: Array<{
-    name: string
-    type: string
-  }>
+    name: string;
+    type: string;
+  }>;
   connections: Array<{
-    from: string
-    to: string
-    type: string
-  }>
+    from: string;
+    to: string;
+    type: string;
+  }>;
 } {
   // Format nodes in the path
-  const formattedNodes = pathResult.path.map(node => ({
+  const formattedNodes = pathResult.path.map((node) => ({
     name: node.name,
-    type: node.type
-  }))
+    type: node.type,
+  }));
 
   // Format edges in the path
-  const formattedConnections = pathResult.edges.map(edge => ({
+  const formattedConnections = pathResult.edges.map((edge) => ({
     from: edge.from,
     to: edge.to,
-    type: edge.type
-  }))
+    type: edge.type,
+  }));
 
   return {
     found: pathResult.found,
     pathLength: pathResult.length,
     nodes: formattedNodes,
-    connections: formattedConnections
-  }
+    connections: formattedConnections,
+  };
 }
 
 /**
@@ -418,53 +414,51 @@ export function formatPathResult(
  * @param searchResult Search result to format
  * @returns Formatted result for JSON output
  */
-export function formatSearchResult(
-  searchResult: {
-    nodes: GraphNode[]
-    edges: GraphEdge[]
-    total: number
-    truncated: boolean
-  }
-): {
-  totalMatches: number
-  returned: number
-  truncated: boolean
+export function formatSearchResult(searchResult: {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  total: number;
+  truncated: boolean;
+}): {
+  totalMatches: number;
+  returned: number;
+  truncated: boolean;
   results: Array<{
-    id: string
-    name: string
-    type: string
-    file?: string
-    description?: string
-  }>
+    id: string;
+    name: string;
+    type: string;
+    file?: string;
+    description?: string;
+  }>;
   relationships: Array<{
-    from: string
-    to: string
-    type: string
-  }>
+    from: string;
+    to: string;
+    type: string;
+  }>;
 } {
   // Format nodes
-  const formattedNodes = searchResult.nodes.map(node => ({
+  const formattedNodes = searchResult.nodes.map((node) => ({
     id: node.id,
     name: node.name,
     type: node.type,
     file: node.file,
-    description: node.description
-  }))
+    description: node.metadata?.documentation,
+  }));
 
   // Format edges
-  const formattedEdges = searchResult.edges.map(edge => ({
+  const formattedEdges = searchResult.edges.map((edge) => ({
     from: edge.from,
     to: edge.to,
-    type: edge.type
-  }))
+    type: edge.type,
+  }));
 
   return {
     totalMatches: searchResult.total,
     returned: searchResult.nodes.length,
     truncated: searchResult.truncated,
     results: formattedNodes,
-    relationships: formattedEdges
-  }
+    relationships: formattedEdges,
+  };
 }
 
 /**
@@ -472,48 +466,46 @@ export function formatSearchResult(
  * @param graph Knowledge graph to format
  * @returns Formatted graph for visualization
  */
-export function formatGraphForVisualization(
-  graph: KnowledgeGraph
-): {
+export function formatGraphForVisualization(graph: KnowledgeGraph): {
   nodes: Array<{
-    id: string
-    label: string
-    type: string
-    group?: string
-    data?: Record<string, any>
-  }>
+    id: string;
+    label: string;
+    type: string;
+    group?: string;
+    data?: Record<string, any>;
+  }>;
   edges: Array<{
-    id: string
-    source: string
-    target: string
-    label: string
-  }>
+    id: string;
+    source: string;
+    target: string;
+    label: string;
+  }>;
 } {
   // Format nodes
-  const formattedNodes = graph.nodes.map(node => ({
+  const formattedNodes = graph.nodes.map((node) => ({
     id: node.id,
     label: node.name,
     type: node.type,
     group: node.type, // Group by type for styling
     data: {
       file: node.file,
-      description: node.description,
-      metadata: node.metadata
-    }
-  }))
+      description: node.metadata?.documentation,
+      metadata: node.metadata,
+    },
+  }));
 
   // Format edges
   const formattedEdges = graph.edges.map((edge, index) => ({
     id: `e${index}`,
     source: edge.from,
     target: edge.to,
-    label: edge.type
-  }))
+    label: edge.type,
+  }));
 
   return {
     nodes: formattedNodes,
-    edges: formattedEdges
-  }
+    edges: formattedEdges,
+  };
 }
 
 /**
@@ -521,24 +513,22 @@ export function formatGraphForVisualization(
  * @param node Graph node to format
  * @returns Formatted node for API response
  */
-export function formatNode(
-  node: GraphNode
-): {
-  id: string
-  name: string
-  type: string
-  file?: string
-  description?: string
-  metadata?: Record<string, any>
+export function formatNode(node: GraphNode): {
+  id: string;
+  name: string;
+  type: string;
+  file?: string;
+  description?: string;
+  metadata?: Record<string, any>;
 } {
   return {
     id: node.id,
     name: node.name,
     type: node.type,
     file: node.file,
-    description: node.description,
-    metadata: node.metadata
-  }
+    description: node.metadata?.documentation,
+    metadata: node.metadata,
+  };
 }
 
 /**
@@ -546,16 +536,14 @@ export function formatNode(
  * @param edge Graph edge to format
  * @returns Formatted edge for API response
  */
-export function formatEdge(
-  edge: GraphEdge
-): {
-  from: string
-  to: string
-  type: string
+export function formatEdge(edge: GraphEdge): {
+  from: string;
+  to: string;
+  type: string;
 } {
   return {
     from: edge.from,
     to: edge.to,
-    type: edge.type
-  }
+    type: edge.type,
+  };
 }

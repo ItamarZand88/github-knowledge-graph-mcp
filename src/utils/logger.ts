@@ -1,34 +1,34 @@
 /**
  * Centralized logging utility
  */
-import pino from 'pino'
+import pino from "pino";
 
 // Define log levels
-type LogLevel = 'debug' | 'info' | 'warn' | 'error'
+type LogLevel = "debug" | "info" | "warn" | "error";
 
 // Determine log level from environment or default to 'info'
-const logLevel = (process.env.LOG_LEVEL as LogLevel) || 'info'
+const logLevel = (process.env.LOG_LEVEL as LogLevel) || "info";
 
 // Create the logger instance
-export const logger = pino({
+export const logger = pino.default({
   level: logLevel,
   transport: {
-    target: 'pino-pretty',
+    target: "pino-pretty",
     options: {
       colorize: true,
-      translateTime: 'SYS:standard',
-      ignore: 'pid,hostname'
-    }
-  }
-})
+      translateTime: "SYS:standard",
+      ignore: "pid,hostname",
+    },
+  },
+});
 
 /**
  * Set the log level dynamically
  * @param level The log level to set
  */
 export function setLogLevel(level: LogLevel): void {
-  (logger as any).level = level
-  logger.info(`Log level set to ${level}`)
+  (logger as any).level = level;
+  logger.info(`Log level set to ${level}`);
 }
 
 /**
@@ -36,8 +36,10 @@ export function setLogLevel(level: LogLevel): void {
  * @param context Context to add to the logger
  * @returns Child logger instance
  */
-export function createContextLogger(context: Record<string, any>): typeof logger {
-  return logger.child(context)
+export function createContextLogger(
+  context: Record<string, any>
+): typeof logger {
+  return logger.child(context);
 }
 
 /**
@@ -56,8 +58,8 @@ export function logPerformance(
     operation,
     durationMs,
     ...metadata,
-    type: 'performance'
-  })
+    type: "performance",
+  });
 }
 
 /**
@@ -66,12 +68,12 @@ export function logPerformance(
  * @returns Function to call when operation is complete
  */
 export function timeOperation(operation: string): () => void {
-  const startTime = performance.now()
+  const startTime = performance.now();
   return (metadata: Record<string, any> = {}): void => {
-    const endTime = performance.now()
-    const durationMs = Math.round(endTime - startTime)
-    logPerformance(operation, durationMs, metadata)
-  }
+    const endTime = performance.now();
+    const durationMs = Math.round(endTime - startTime);
+    logPerformance(operation, durationMs, metadata);
+  };
 }
 
 /**
@@ -79,9 +81,12 @@ export function timeOperation(operation: string): () => void {
  * @param error The error to log
  * @param context Additional context
  */
-export function logError(error: Error | string, context: Record<string, any> = {}): void {
-  if (typeof error === 'string') {
-    logger.error({ ...context, type: 'error' }, error)
+export function logError(
+  error: Error | string,
+  context: Record<string, any> = {}
+): void {
+  if (typeof error === "string") {
+    logger.error({ ...context, type: "error" }, error);
   } else {
     logger.error(
       {
@@ -89,12 +94,12 @@ export function logError(error: Error | string, context: Record<string, any> = {
         error: {
           message: error.message,
           stack: error.stack,
-          name: error.name
+          name: error.name,
         },
-        type: 'error'
+        type: "error",
       },
       error.message
-    )
+    );
   }
 }
 
@@ -106,18 +111,18 @@ export function logError(error: Error | string, context: Record<string, any> = {
  */
 export function logApiRequest(
   req: {
-    method: string
-    url: string
-    headers: Record<string, any>
-    body?: any
+    method: string;
+    url: string;
+    headers: Record<string, any>;
+    body?: any;
   },
   res: {
-    statusCode: number
+    statusCode: number;
   },
   startTime: number
 ): void {
-  const endTime = performance.now()
-  const durationMs = Math.round(endTime - startTime)
+  const endTime = performance.now();
+  const durationMs = Math.round(endTime - startTime);
 
   logger.info({
     msg: `API Request: ${req.method} ${req.url} ${res.statusCode} ${durationMs}ms`,
@@ -125,9 +130,9 @@ export function logApiRequest(
     url: req.url,
     statusCode: res.statusCode,
     durationMs,
-    userAgent: req.headers['user-agent'],
-    type: 'api'
-  })
+    userAgent: req.headers["user-agent"],
+    type: "api",
+  });
 }
 
-export default logger
+export default logger;
