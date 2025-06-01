@@ -5,7 +5,8 @@
   "main": "dist/index.js",
   "type": "module",
   "bin": {
-    "github-knowledge-graph-mcp": "./dist/index.js"
+    "github-knowledge-graph-mcp": "./dist/index.js",
+    "claude-config": "./dist/install-claude-config.js"
   },
   "scripts": {
     "build": "tsc",
@@ -14,7 +15,9 @@
     "lint": "eslint src/**/*.ts",
     "test": "jest",
     "clean": "rimraf dist",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "install-claude": "node dist/install-claude-config.js",
+    "postinstall": "node -e \"try { require('fs').existsSync('./dist/install-claude-config.js') && console.log('\\n🎮 Run \\'npm run install-claude\\' to configure Claude Desktop integration') } catch {}\""
   },
   "keywords": [
     "github",
