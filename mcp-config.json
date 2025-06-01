@@ -1,14 +1,14 @@
 {
-  "port": 3010,
-  "host": "127.0.0.1",
-  "dataDir": "./data",
-  "maxConcurrentJobs": 2,
-  "jobTimeout": 1800000,
-  "allowOrigins": ["http://localhost:3000"],
-  "logLevel": "info",
-  "auth": {
-    "enabled": false,
-    "apiKeyHeader": "x-api-key",
-    "apiKeys": ["your-api-key-here"]
+  "mcpServers": {
+    "github-knowledge-graph": {
+      "command": "node",
+      "args": ["./packages/mcp-server/dist/index.js"],
+      "cwd": "${PWD}",
+      "env": {
+        "LOG_LEVEL": "info",
+        "NODE_ENV": "production",
+        "MCP_DATA_DIR": "$HOME/.github-knowledge-graph/data"
+      }
+    }
   }
 }
