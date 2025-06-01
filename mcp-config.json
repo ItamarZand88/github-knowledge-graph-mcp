@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "github-knowledge-graph": {
+      "command": "node",
+      "args": ["./dist/index.js"],
+      "cwd": ".",
+      "env": {
+        "LOG_LEVEL": "info",
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}
